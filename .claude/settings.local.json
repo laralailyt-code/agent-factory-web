@@ -43,7 +43,9 @@
       "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx, json; r = httpx.get\\('https://agent-factory-web.onrender.com/api/mode', timeout=30\\); print\\(json.dumps\\(r.json\\(\\), indent=2, ensure_ascii=False\\)\\)\")",
       "PowerShell(New-Item -ItemType Directory -Force factory\\\\static\\\\downloads | Out-Null; Copy-Item generated\\\\job_627f0f86\\\\dist\\\\ExcelDiff.exe factory\\\\static\\\\downloads\\\\ExcelDiff.exe; Get-Item factory\\\\static\\\\downloads\\\\ExcelDiff.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round\\($_.Length/1MB,1\\)}})",
       "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.head\\('https://agent-factory-web.onrender.com/downloads/ExcelDiff.exe', timeout=30, follow_redirects=True\\); print\\(f'HTTP {r.status_code} �P content-type: {r.headers.get\\(\\\\\"content-type\\\\\"\\)} �P size: {r.headers.get\\(\\\\\"content-length\\\\\"\\)} bytes'\\)\")",
-      "PowerShell(.venv\\\\Scripts\\\\python.exe _smoke_exe.py)"
+      "PowerShell(.venv\\\\Scripts\\\\python.exe _smoke_exe.py)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; $env:MOCK_LLM=\"true\"; $env:RUN_PYINSTALLER=\"true\"; .venv\\\\Scripts\\\\python.exe -m factory.run \"做一個 Excel 比對小程式 · 庫存有機密 · 要桌面 .exe\")",
+      "PowerShell(Copy-Item generated\\\\job_5b1b113e\\\\dist\\\\ExcelDiff.exe factory\\\\static\\\\downloads\\\\ExcelDiff.exe -Force)"
     ]
   }
 }

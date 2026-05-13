@@ -122,8 +122,8 @@ MOCK_DESIGNS: dict[str, dict] = {
         "stack": ["Python 3.11", "pandas", "openpyxl", "tkinter", "PyInstaller"],
         "deploy_target": "Desktop .exe (internal IT push)",
         "api_routes": [],
-        "file_plan": ["main.py", "diff_engine.py", "gui.py", "build.spec", "requirements.txt"],
-        "distribution": "Win32 .exe · 內網 IT 推送 · 47 同事自動更新",
+        "file_plan": ["main.py", "diff_engine.py", "gui.py", "telemetry.py", "build.spec", "requirements.txt"],
+        "distribution": "Win32 .exe · 內網 IT 推送 · 47 同事自動更新 · 內建 schema-only 錯誤上報",
     },
     "war_room": {
         "stack": ["Next.js 14", "TypeScript", "Tailwind CSS", "Redis", "Vercel Cron"],

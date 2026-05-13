@@ -61,6 +61,26 @@ class FeedbackPayload(BaseModel):
     user_request: str | None = None
 
 
+class ExeFrame(BaseModel):
+    file: str | None = None
+    line: int | None = None
+    func: str | None = None
+
+
+class ExeTelemetryPayload(BaseModel):
+    """Schema-only crash report from a generated .exe.
+
+    Privacy contract on the client side ensures NO cell data, NO file paths,
+    NO variable values, NO error messages. Only structural signals.
+    """
+    app: str
+    version: str = "?"
+    os: str = "?"
+    os_release: str = "?"
+    error_type: str
+    frames: list[ExeFrame] = []
+
+
 @app.get("/api/mode")
 def get_mode() -> dict:
     s = mode_status()
@@ -101,6 +121,36 @@ def submit_feedback(payload: FeedbackPayload) -> dict:
     if not ok:
         raise HTTPException(500, "推 Telegram 失敗,稍後再試")
     return {"ok": True}
+
+
+# ---------- Schema-only telemetry from generated .exe products (Level B') ----------
+
+@app.post("/api/exe_telemetry")
+def submit_exe_telemetry(payload: ExeTelemetryPayload) -> dict:
+    """機密產品(.exe)的結構訊號上報。
+
+    Contract: 客戶端保證**只送結構訊號** — error type + frames + OS metadata。
+    伺服器端不期待也不接受 cell data / file paths / 變數值。
+    """
+    frames_str = "\n".join(
+        f"  {f.file or '?'}:{f.line or '?'} in {f.func or '?'}"
+        for f in payload.frames[-8:]
+    ) or "  (no frames)"
+
+    text = (
+        f"💥 {payload.app} v{payload.version} crashed (schema-only)\n\n"
+        f"Error: {payload.error_type}\n"
+        f"OS: {payload.os} {payload.os_release}\n\n"
+        f"Stack (tail):\n{frames_str}\n\n"
+        f"⚠️ 提醒: 這是結構訊號 · 無 cell 資料 · 無檔案路徑"
+    )
+
+    delivered = telemetry.notify(
+        text,
+        severity="error",
+        tag=f"exe-crash:{payload.app}",
+    )
+    return {"ok": True, "delivered": delivered}
 
 
 @app.post("/api/mode")
