@@ -41,7 +41,9 @@
       "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.get\\('https://agent-factory-web.onrender.com/', timeout=30\\); print\\(f'HTTP {r.status_code} �P {len\\(r.content\\)} bytes �P title in body:', '<title>' in r.text\\)\")",
       "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.get\\('https://agent-factory-web.onrender.com/api/factory/stream', params={'req': '���ӭ쪫�ƭ��I�iĵ'}, timeout=60\\); print\\(f'HTTP {r.status_code} �P {len\\(r.text\\)} chars'\\); lines = [l for l in r.text.splitlines\\(\\) if l.startswith\\('data:'\\)]; print\\(f'sse events: {len\\(lines\\)}'\\); print\\('first event:', lines[0][:120] if lines else '\\(none\\)'\\); print\\('last event :', lines[-1][:120] if lines else '\\(none\\)'\\)\")",
       "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx, json; r = httpx.get\\('https://agent-factory-web.onrender.com/api/mode', timeout=30\\); print\\(json.dumps\\(r.json\\(\\), indent=2, ensure_ascii=False\\)\\)\")",
-      "PowerShell(New-Item -ItemType Directory -Force factory\\\\static\\\\downloads | Out-Null; Copy-Item generated\\\\job_627f0f86\\\\dist\\\\ExcelDiff.exe factory\\\\static\\\\downloads\\\\ExcelDiff.exe; Get-Item factory\\\\static\\\\downloads\\\\ExcelDiff.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round\\($_.Length/1MB,1\\)}})"
+      "PowerShell(New-Item -ItemType Directory -Force factory\\\\static\\\\downloads | Out-Null; Copy-Item generated\\\\job_627f0f86\\\\dist\\\\ExcelDiff.exe factory\\\\static\\\\downloads\\\\ExcelDiff.exe; Get-Item factory\\\\static\\\\downloads\\\\ExcelDiff.exe | Select-Object Name, @{N='SizeMB';E={[math]::Round\\($_.Length/1MB,1\\)}})",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.head\\('https://agent-factory-web.onrender.com/downloads/ExcelDiff.exe', timeout=30, follow_redirects=True\\); print\\(f'HTTP {r.status_code} �P content-type: {r.headers.get\\(\\\\\"content-type\\\\\"\\)} �P size: {r.headers.get\\(\\\\\"content-length\\\\\"\\)} bytes'\\)\")",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe _smoke_exe.py)"
     ]
   }
 }

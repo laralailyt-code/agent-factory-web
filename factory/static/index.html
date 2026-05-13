@@ -198,6 +198,43 @@
   </footer>
 </main>
 
+<!-- Floating "回報異常" button (always bottom-right) -->
+<button id="feedback-fab"
+  class="fixed bottom-6 right-6 z-40 flex items-center gap-2 px-4 py-3 rounded-full bg-white shadow-lg ring-1 ring-slate-200 hover:shadow-xl hover:ring-violet-300 transition-all text-sm font-semibold text-slate-700"
+  title="回報異常或補充意見">
+  <span class="text-base">📝</span><span>回報</span>
+</button>
+
+<!-- Feedback modal -->
+<div id="feedback-overlay" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center px-4">
+  <div class="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 fade-in">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-lg font-bold text-slate-900">📝 回報異常或補充意見</h2>
+      <button id="feedback-close" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">×</button>
+    </div>
+    <p class="text-xs text-slate-500 mb-4">
+      訊息 + 當下 context(job_id / 模式 / deploy URL)會推到 Lara 的 Telegram。
+      Factory 後端遇到 crash 也會自動推同一個地方,所以你看到任何怪事都歡迎補充。
+    </p>
+
+    <textarea id="feedback-text" rows="5" maxlength="2000"
+      class="w-full px-3 py-2 rounded-lg border border-slate-300 focus:border-violet-500 focus:ring-2 focus:ring-violet-200 outline-none text-sm"
+      placeholder="例如:Excel 比對 .exe 雙擊沒反應 / 戰情室 URL 進不去 / AI 分析感覺怪..."></textarea>
+
+    <details class="mt-2 text-[11px] text-slate-500">
+      <summary class="cursor-pointer hover:text-slate-700">附上的 context(自動)</summary>
+      <pre id="feedback-context" class="bg-slate-50 rounded p-2 mt-1 font-mono text-[10px] leading-tight">尚未跑過 Factory</pre>
+    </details>
+
+    <button id="feedback-submit"
+      class="mt-4 w-full bg-violet-600 hover:bg-violet-700 text-white font-semibold py-2.5 rounded-lg transition active:scale-95">
+      送出
+    </button>
+
+    <p id="feedback-msg" class="text-xs text-center mt-3 min-h-[1.2em]"></p>
+  </div>
+</div>
+
 <script>
 const AGENTS = [
   { key: "clarifier", name: "Clarifier", emoji: "🧠", role: "需求收斂", field: "prd" },
@@ -491,6 +528,89 @@ document.querySelectorAll(".mode-btn").forEach(btn => {
 // Initial poll + every 30s refresh
 refreshModeBadge();
 setInterval(refreshModeBadge, 30000);
+
+
+// ============ Feedback FAB ============
+
+const fbOverlay = document.getElementById("feedback-overlay");
+const fbText = document.getElementById("feedback-text");
+const fbCtxEl = document.getElementById("feedback-context");
+const fbMsg = document.getElementById("feedback-msg");
+
+function feedbackContext() {
+  const prd = cumulativeState.prd || {};
+  return {
+    job_id: cumulativeState.job_id || "(尚未跑)",
+    mode: cumulativeState.mode || (modeText.textContent || "?"),
+    deploy_url: cumulativeState.deploy_url || "(尚未跑)",
+    user_request: (document.getElementById("req").value || "").slice(0, 200),
+    name_tc: prd.name_tc || "?",
+  };
+}
+
+function renderFeedbackContext() {
+  const ctx = feedbackContext();
+  fbCtxEl.textContent = Object.entries(ctx).map(([k, v]) => `${k}: ${v}`).join("\n");
+}
+
+document.getElementById("feedback-fab").addEventListener("click", () => {
+  fbMsg.textContent = "";
+  fbText.value = "";
+  renderFeedbackContext();
+  fbOverlay.classList.remove("hidden");
+  setTimeout(() => fbText.focus(), 50);
+});
+
+document.getElementById("feedback-close").addEventListener("click", () => {
+  fbOverlay.classList.add("hidden");
+});
+
+fbOverlay.addEventListener("click", (e) => {
+  if (e.target === fbOverlay) fbOverlay.classList.add("hidden");
+});
+
+document.getElementById("feedback-submit").addEventListener("click", async () => {
+  const text = fbText.value.trim();
+  if (!text) {
+    fbMsg.innerHTML = `<span class="text-rose-600">先寫點什麼</span>`;
+    fbText.focus();
+    return;
+  }
+  const ctx = feedbackContext();
+  fbMsg.innerHTML = `<span class="text-slate-500">送出中...</span>`;
+  try {
+    const r = await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        job_id: ctx.job_id,
+        deploy_url: ctx.deploy_url,
+        mode: ctx.mode,
+        user_request: ctx.user_request,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      fbMsg.innerHTML = `<span class="text-rose-600">${data.detail || `HTTP ${r.status}`}</span>`;
+      return;
+    }
+    fbMsg.innerHTML = `<span class="text-emerald-600">✓ 已送出 · Lara 手機會收到通知</span>`;
+    fbText.value = "";
+    setTimeout(() => fbOverlay.classList.add("hidden"), 1500);
+  } catch (e) {
+    fbMsg.innerHTML = `<span class="text-rose-600">${e.message}</span>`;
+  }
+});
+
+// Track job_id + mode + user_request into cumulativeState for the feedback context
+const _origShowInit = showInit;
+showInit = function(data) {
+  cumulativeState.job_id = data.job_id;
+  cumulativeState.mode = data.mode;
+  cumulativeState.user_request = data.request;
+  _origShowInit(data);
+};
 </script>
 </body>
 </html>

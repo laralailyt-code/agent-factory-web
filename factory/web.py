@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from .graph import build_graph
 from .llm import is_mock, set_mock_override, mode_status
+from . import telemetry
 
 
 app = FastAPI(title="Agent Factory · Web")
@@ -52,11 +53,54 @@ class ModePayload(BaseModel):
     mode: str  # "mock" | "real" | "auto"
 
 
+class FeedbackPayload(BaseModel):
+    message: str
+    job_id: str | None = None
+    deploy_url: str | None = None
+    mode: str | None = None
+    user_request: str | None = None
+
+
 @app.get("/api/mode")
 def get_mode() -> dict:
     s = mode_status()
     s["admin_enabled"] = bool(os.getenv("ADMIN_PASSWORD", "").strip())
+    s["feedback_enabled"] = telemetry.is_configured()
     return s
+
+
+# ---------- Manual user feedback · pushes to Lara's Telegram ----------
+
+@app.post("/api/feedback")
+def submit_feedback(payload: FeedbackPayload) -> dict:
+    msg = (payload.message or "").strip()
+    if not msg:
+        raise HTTPException(400, "訊息空白")
+    if len(msg) > 2000:
+        msg = msg[:2000] + "..."
+
+    if not telemetry.is_configured():
+        # Fallback: log to stdout so Render dashboard captures it
+        print(f"[FEEDBACK · no Telegram config] {msg}")
+        raise HTTPException(
+            503,
+            "回報功能還沒設定 · 請聯絡 Factory 維運者(Render env vars: TG_BOT_TOKEN + TG_CHAT_ID)",
+        )
+
+    ok = telemetry.notify(
+        msg,
+        severity="user",
+        tag="manual-feedback",
+        context={
+            "job_id": payload.job_id or "(無)",
+            "mode": payload.mode or "(無)",
+            "deploy_url": payload.deploy_url or "(無)",
+            "user_request": (payload.user_request or "")[:200] or "(無)",
+        },
+    )
+    if not ok:
+        raise HTTPException(500, "推 Telegram 失敗,稍後再試")
+    return {"ok": True}
 
 
 @app.post("/api/mode")
@@ -135,6 +179,16 @@ async def stream_factory(req: str = ""):
         except Exception as e:
             import traceback
             traceback.print_exc()
+            # Auto-telemetry · push pipeline crash to Lara's Telegram (silent no-op if not configured)
+            telemetry.notify_exception(
+                e,
+                tag="pipeline-crash",
+                context={
+                    "job_id": job_id,
+                    "mode": mode,
+                    "request": user_request[:200],
+                },
+            )
             yield f"data: {json.dumps({'type': 'error', 'message': f'{type(e).__name__}: {e}'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
