@@ -362,13 +362,31 @@ def deployer_node(state: FactoryState) -> FactoryState:
     deploy_url: str | None = None
 
     if sub == "excel_diff":
-        # D3.1 · PyInstaller
-        if os.getenv("RUN_PYINSTALLER", "false").lower() == "true":
+        # D3.1 · PyInstaller — only meaningful on Windows.
+        # On Linux (Render) we can't build a Windows .exe so we redirect to the
+        # pre-built binary that ships with the deployment.
+        if (
+            os.getenv("RUN_PYINSTALLER", "false").lower() == "true"
+            and sys.platform == "win32"
+        ):
             exe_path = _real_pyinstaller_build(out_dir, log)
             if exe_path:
                 deploy_url = f"file://{exe_path}"
+
         if deploy_url is None:
-            deploy_url = f"file://{out_dir.absolute()} [.exe 需執行 PyInstaller · 想真打包設 RUN_PYINSTALLER=true]"
+            # Check whether we have a pre-built .exe shipped with the service.
+            shipped_exe = Path(__file__).parent.parent / "static" / "downloads" / "ExcelDiff.exe"
+            base = os.getenv("PUBLIC_BASE_URL", "https://agent-factory-web.onrender.com").rstrip("/")
+            if shipped_exe.exists():
+                deploy_url = f"{base}/downloads/ExcelDiff.exe"
+                log.append("  📦 桌面 .exe 已產出 · 機密採購工具按設計不在雲端 build")
+                log.append(f"     下載: {deploy_url}")
+                log.append(f"     大小: {shipped_exe.stat().st_size // (1024*1024)} MB")
+            else:
+                deploy_url = (
+                    f"file://{out_dir.absolute()} [.exe 需執行 PyInstaller · "
+                    f"想真打包設 RUN_PYINSTALLER=true 並在 Windows 環境跑]"
+                )
 
     elif sub == "war_room":
         # D3.2 · Vercel

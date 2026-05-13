@@ -21,6 +21,7 @@ except ImportError:
 
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .graph import build_graph
@@ -31,6 +32,10 @@ app = FastAPI(title="Agent Factory · Web")
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
+
+DOWNLOADS_DIR = STATIC_DIR / "downloads"
+DOWNLOADS_DIR.mkdir(exist_ok=True)
+app.mount("/downloads", StaticFiles(directory=str(DOWNLOADS_DIR)), name="downloads")
 
 
 @app.get("/", response_class=HTMLResponse)
