@@ -26,10 +26,22 @@ except ImportError:
 from .categories import match_category
 
 
-MOCK_LLM = (
-    os.getenv("MOCK_LLM", "false").lower() == "true"
-    or not os.getenv("ANTHROPIC_API_KEY")
-)
+# Runtime override · let admin UI flip mode without restarting the process.
+# None = use env-var defaults · True = force mock · False = force real (needs API key)
+_runtime_mock_override: bool | None = None
+
+
+def _env_mock_default() -> bool:
+    """What env vars alone would dictate (ignoring runtime override)."""
+    return (
+        os.getenv("MOCK_LLM", "false").lower() == "true"
+        or not os.getenv("ANTHROPIC_API_KEY")
+    )
+
+
+# Module-import constant — kept for backwards compatibility with anything that
+# imported `MOCK_LLM` directly. New code should call `is_mock()` instead.
+MOCK_LLM = _env_mock_default()
 
 # Optional custom endpoint (e.g. contest Azure AI Foundry proxy).
 # When set, Anthropic SDK is pointed here instead of api.anthropic.com.
@@ -198,7 +210,7 @@ def call_llm(
     mock_user_request: Optional[str] = None,
 ) -> str:
     """Call Claude with a system + user prompt. Returns text."""
-    if MOCK_LLM:
+    if is_mock():
         if mock_key and mock_user_request:
             category_key = _pick_category_for(mock_user_request)
             if mock_key == "clarifier":
@@ -239,4 +251,30 @@ def call_llm_json(
 
 
 def is_mock() -> bool:
-    return MOCK_LLM
+    """Runtime check · honors set_mock_override() · falls back to env vars."""
+    if _runtime_mock_override is not None:
+        return _runtime_mock_override
+    return _env_mock_default()
+
+
+def set_mock_override(value: bool | None) -> None:
+    """Flip the runtime mode without restarting the process.
+
+    None  → use env-var defaults (default state on cold start)
+    True  → force mock (no API calls)
+    False → force real (requires ANTHROPIC_API_KEY in env)
+    """
+    global _runtime_mock_override
+    _runtime_mock_override = value
+
+
+def mode_status() -> dict:
+    """Snapshot of current mode + capabilities · used by /api/mode endpoint."""
+    return {
+        "mock": is_mock(),
+        "override_active": _runtime_mock_override is not None,
+        "env_default_mock": _env_mock_default(),
+        "has_anthropic_key": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "anthropic_base_url": ANTHROPIC_BASE_URL,
+        "model": MODELS.get("sonnet", "?"),
+    }

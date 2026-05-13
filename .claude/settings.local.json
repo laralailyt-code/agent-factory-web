@@ -36,7 +36,10 @@
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; $env:REAL_DEPLOY=\"true\"; .venv\\\\Scripts\\\\python.exe -m factory.run \"做個原物料風險告警 · 戰爭油價即時推送\")",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.poll_render srv-d81sff03kofs73c3ishg)",
       "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.check_anthropic)",
-      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.deploy_factory_web)"
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.deploy_factory_web)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.poll_render srv-d81spvgsfn5c738uk86g)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.get\\('https://agent-factory-web.onrender.com/', timeout=30\\); print\\(f'HTTP {r.status_code} �P {len\\(r.content\\)} bytes �P title in body:', '<title>' in r.text\\)\")",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.get\\('https://agent-factory-web.onrender.com/api/factory/stream', params={'req': '���ӭ쪫�ƭ��I�iĵ'}, timeout=60\\); print\\(f'HTTP {r.status_code} �P {len\\(r.text\\)} chars'\\); lines = [l for l in r.text.splitlines\\(\\) if l.startswith\\('data:'\\)]; print\\(f'sse events: {len\\(lines\\)}'\\); print\\('first event:', lines[0][:120] if lines else '\\(none\\)'\\); print\\('last event :', lines[-1][:120] if lines else '\\(none\\)'\\)\")"
     ]
   }
 }

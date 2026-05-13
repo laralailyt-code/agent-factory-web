@@ -8,6 +8,7 @@
 from __future__ import annotations
 import asyncio
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -18,11 +19,12 @@ try:
 except ImportError:
     pass
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel
 
 from .graph import build_graph
-from .llm import is_mock
+from .llm import is_mock, set_mock_override, mode_status
 
 
 app = FastAPI(title="Agent Factory · Web")
@@ -37,6 +39,46 @@ def root() -> HTMLResponse:
     if not index.exists():
         return HTMLResponse("<h1>index.html not found</h1>", status_code=404)
     return HTMLResponse(index.read_text(encoding="utf-8"))
+
+
+# ---------- Admin · mode toggle ----------
+
+class ModePayload(BaseModel):
+    mode: str  # "mock" | "real" | "auto"
+
+
+@app.get("/api/mode")
+def get_mode() -> dict:
+    s = mode_status()
+    s["admin_enabled"] = bool(os.getenv("ADMIN_PASSWORD", "").strip())
+    return s
+
+
+@app.post("/api/mode")
+def set_mode(payload: ModePayload, x_admin_password: str = Header(None)) -> dict:
+    admin_pw = (os.getenv("ADMIN_PASSWORD") or "").strip()
+    if not admin_pw:
+        raise HTTPException(503, "admin password 沒設定 · 在 Render env vars 加 ADMIN_PASSWORD 後重新部署")
+    if x_admin_password != admin_pw:
+        raise HTTPException(401, "密碼錯誤")
+
+    mode = payload.mode.lower().strip()
+    if mode == "mock":
+        set_mock_override(True)
+    elif mode == "real":
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            raise HTTPException(
+                412,
+                "缺 ANTHROPIC_API_KEY · 在 Render env vars 加 ANTHROPIC_API_KEY / "
+                "ANTHROPIC_BASE_URL / ANTHROPIC_MODEL_OVERRIDE 後重新部署",
+            )
+        set_mock_override(False)
+    elif mode == "auto":
+        set_mock_override(None)
+    else:
+        raise HTTPException(400, f"無效 mode: {mode} (要 mock / real / auto)")
+
+    return get_mode()
 
 
 @app.get("/api/factory/stream")
