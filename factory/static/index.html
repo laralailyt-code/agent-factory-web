@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Factory · Web Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Noto Sans TC", sans-serif; }
+  @keyframes pulse-glow {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(124, 58, 237, 0.4); }
+    50% { box-shadow: 0 0 0 12px rgba(124, 58, 237, 0); }
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  .agent-running { animation: pulse-glow 1.5s ease-in-out infinite; }
+  .shimmer {
+    background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.15), transparent);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s linear infinite;
+  }
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.4); }
+  }
+  .live-dot { animation: pulse-dot 2s ease-in-out infinite; }
+  #log::-webkit-scrollbar { width: 8px; }
+  #log::-webkit-scrollbar-track { background: #0f172a; }
+  #log::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  .fade-in { animation: fadeIn 0.4s ease-out; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body class="min-h-screen bg-gradient-to-br from-slate-50 via-white to-violet-50/40">
+<main class="max-w-6xl mx-auto px-6 py-10 lg:py-14">
+
+  <!-- Header -->
+  <header class="mb-10">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="inline-block w-2 h-2 rounded-full bg-violet-500 live-dot"></span>
+      <span class="text-[11px] font-bold tracking-[0.15em] uppercase text-violet-600">
+        Agent Factory · Web Dashboard
+      </span>
+    </div>
+    <h1 class="text-4xl lg:text-5xl font-bold text-slate-900 tracking-tight mb-2">
+      一句話 → 上線的 AI 產品
+    </h1>
+    <p class="text-slate-600 text-base">
+      5 個 Claude agent 接力 · 即時看工廠運轉 · Powered by Sonnet 4.5
+    </p>
+  </header>
+
+  <!-- Input Card -->
+  <section class="bg-white rounded-2xl shadow-sm ring-1 ring-slate-200 p-6 mb-8">
+    <label class="block text-sm font-semibold text-slate-700 mb-2">
+      你的需求(一句話就好)
+    </label>
+    <div class="flex gap-3">
+      <input id="req" type="text"
+        class="flex-1 px-4 py-3 rounded-xl border border-slate-300 focus:border-violet-500 focus:ring-2 focus:ring-violet-200 outline-none text-base"
+        placeholder="例如:做個原物料風險告警 · 戰爭油價即時推送"
+        autofocus />
+      <button id="run"
+        class="px-6 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 text-white font-semibold hover:from-violet-700 hover:to-indigo-700 active:scale-95 transition-all shadow-lg shadow-violet-500/30 whitespace-nowrap">
+        🚀 啟動 Factory
+      </button>
+    </div>
+    <div class="mt-3 flex flex-wrap gap-2">
+      <span class="text-xs text-slate-500 mr-1">快速範例:</span>
+      <button class="example text-xs px-3 py-1 rounded-full bg-slate-100 text-slate-700 hover:bg-violet-100 hover:text-violet-700 transition" data-text="做個原物料風險告警 · 戰爭油價即時推送">原物料風險</button>
+      <button class="example text-xs px-3 py-1 rounded-full bg-slate-100 text-slate-700 hover:bg-violet-100 hover:text-violet-700 transition" data-text="做個競品戰情室 · 盯 5 家對手價格新品新聞">競品戰情室</button>
+      <button class="example text-xs px-3 py-1 rounded-full bg-slate-100 text-slate-700 hover:bg-violet-100 hover:text-violet-700 transition" data-text="做一個 Excel 比對小程式 · 庫存有機密 · 要桌面 .exe">Excel 比對</button>
+    </div>
+  </section>
+
+  <!-- Status Bar (job_id + mode) -->
+  <section id="status-bar" class="hidden mb-6 flex items-center gap-3 text-xs text-slate-500">
+    <span id="job-id" class="font-mono"></span>
+    <span class="text-slate-300">|</span>
+    <span id="mode-badge"></span>
+  </section>
+
+  <!-- Agent Timeline -->
+  <section class="mb-8">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+      <!-- Cards filled by JS -->
+    </div>
+  </section>
+
+  <!-- Live Log Terminal -->
+  <section class="mb-8">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="text-sm font-semibold text-slate-700">即時 Log</h2>
+      <span id="log-status" class="text-xs text-slate-500">待命中</span>
+    </div>
+    <pre id="log" class="bg-slate-900 text-emerald-300 rounded-xl p-5 text-xs font-mono leading-relaxed h-72 overflow-y-auto ring-1 ring-slate-800">等待輸入...</pre>
+  </section>
+
+  <!-- Final Result -->
+  <section id="result" class="hidden bg-gradient-to-br from-emerald-50 to-teal-50 ring-1 ring-emerald-200 rounded-2xl p-8 fade-in">
+    <div class="flex items-center gap-3 mb-4">
+      <span class="text-3xl">✅</span>
+      <div>
+        <h2 id="result-title" class="text-2xl font-bold text-slate-900">DONE</h2>
+        <p id="result-sub" class="text-sm text-slate-600"></p>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+      <div class="bg-white/60 rounded-xl p-4 ring-1 ring-emerald-100">
+        <div class="text-xs text-slate-500 mb-1">產出檔案</div>
+        <div class="text-2xl font-bold text-slate-900"><span id="r-files">-</span> 個</div>
+      </div>
+      <div class="bg-white/60 rounded-xl p-4 ring-1 ring-emerald-100">
+        <div class="text-xs text-slate-500 mb-1">測試通過</div>
+        <div class="text-2xl font-bold text-slate-900" id="r-tests">-</div>
+      </div>
+      <div class="bg-white/60 rounded-xl p-4 ring-1 ring-emerald-100">
+        <div class="text-xs text-slate-500 mb-1">迭代次數</div>
+        <div class="text-2xl font-bold text-slate-900"><span id="r-iter">-</span></div>
+      </div>
+    </div>
+    <div class="bg-white/60 rounded-xl p-4 ring-1 ring-emerald-100">
+      <div class="text-xs font-semibold text-slate-500 uppercase tracking-widest mb-2">Deploy URL</div>
+      <a id="r-url" href="#" target="_blank" rel="noopener noreferrer"
+        class="text-violet-700 hover:text-violet-900 font-semibold break-all">-</a>
+    </div>
+    <details class="mt-4 bg-white/60 rounded-xl p-4 ring-1 ring-emerald-100">
+      <summary class="text-xs font-semibold text-slate-500 uppercase tracking-widest cursor-pointer">檔案清單</summary>
+      <ul id="r-file-list" class="mt-3 text-sm text-slate-700 space-y-1"></ul>
+    </details>
+  </section>
+
+  <!-- Error -->
+  <section id="error" class="hidden bg-rose-50 ring-1 ring-rose-200 rounded-2xl p-6 fade-in">
+    <div class="flex items-start gap-3">
+      <span class="text-2xl">❌</span>
+      <div>
+        <h2 class="text-lg font-bold text-rose-900 mb-1">出錯了</h2>
+        <p id="error-msg" class="text-sm text-rose-800"></p>
+      </div>
+    </div>
+  </section>
+
+  <footer class="mt-16 pt-6 border-t border-slate-200 text-center text-xs text-slate-400">
+    Agent Factory · 一句話 → 5 個 agent 接力 → 上線的 AI 產品 · Powered by Claude Sonnet 4.5
+  </footer>
+</main>
+
+<script>
+const AGENTS = [
+  { key: "clarifier", name: "Clarifier", emoji: "🧠", role: "需求收斂", field: "prd" },
+  { key: "architect", name: "Architect", emoji: "📐", role: "系統設計", field: "design" },
+  { key: "builder",   name: "Builder",   emoji: "⚙️", role: "寫 code",  field: "file_count" },
+  { key: "tester",    name: "Tester",    emoji: "🧪", role: "跑測試",   field: "test_results" },
+  { key: "deployer",  name: "Deployer",  emoji: "🚀", role: "部署上線", field: "deploy_url" },
+];
+
+const STATUS_COLORS = {
+  pending: { bg: "bg-slate-50",    ring: "ring-slate-200",  text: "text-slate-400", dot: "bg-slate-300", label: "待命" },
+  running: { bg: "bg-violet-50",   ring: "ring-violet-300", text: "text-violet-700", dot: "bg-violet-500", label: "進行中" },
+  done:    { bg: "bg-emerald-50",  ring: "ring-emerald-200",text: "text-emerald-700", dot: "bg-emerald-500", label: "完成" },
+};
+
+function renderAgentCards(state = {}, currentRunning = null) {
+  const grid = document.querySelector("main section:nth-of-type(3) > div");
+  grid.innerHTML = "";
+  AGENTS.forEach((a, idx) => {
+    const isDone = state[a.field] != null && state[a.field] !== 0 && state[a.field] !== "";
+    let status = isDone ? "done" : (currentRunning === a.key ? "running" : "pending");
+    const s = STATUS_COLORS[status];
+    const detail = state.__details?.[a.key] || "";
+
+    const card = document.createElement("div");
+    card.className = `relative rounded-2xl p-4 ring-1 transition-all ${s.bg} ${s.ring} ${status === "running" ? "agent-running" : ""}`;
+    card.innerHTML = `
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-2xl">${a.emoji}</span>
+        <span class="inline-block w-1.5 h-1.5 rounded-full ${s.dot} ${status === "running" ? "live-dot" : ""}"></span>
+        <span class="text-[10px] font-bold uppercase tracking-widest ${s.text}">${s.label}</span>
+      </div>
+      <div class="font-bold text-slate-900 text-sm">${a.name}</div>
+      <div class="text-xs text-slate-500 mb-2">${a.role}</div>
+      <div class="text-xs ${s.text} font-medium min-h-[2.5em]">${detail}</div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+function deriveDetails(state) {
+  const d = {};
+  if (state.prd) d.clarifier = `${state.prd.name_tc || "?"} · ${state.prd.agent_type || "?"}`;
+  if (state.design) d.architect = `${state.design.deploy_target || "?"} · ${(state.design.file_plan || []).length} 檔`;
+  if (state.file_count) d.builder = `寫完 ${state.file_count} 個檔案`;
+  if (state.test_results) {
+    const tr = state.test_results;
+    const total = (tr.passed || 0) + (tr.failed || 0);
+    d.tester = `${tr.passed || 0}/${total} 通過${tr.failed ? ` · ${tr.failed} fail` : ""}`;
+  }
+  if (state.deploy_url) {
+    const isMock = state.deploy_url.includes("[MOCK");
+    d.deployer = isMock ? "MOCK URL 完成" : "真實部署完成";
+  }
+  return d;
+}
+
+function currentRunningAgent(state) {
+  // current_stage in returned state = NEXT stage. So running = current_stage's agent (if not done).
+  const s = state.current_stage;
+  if (!s || s === "done") return null;
+  if (AGENTS.find(a => a.key === s)) {
+    // verify it's not already "done" (data field filled)
+    const a = AGENTS.find(x => x.key === s);
+    if (state[a.field] == null) return s;
+  }
+  return null;
+}
+
+let evtSource = null;
+let logEl = null;
+let cumulativeState = {};
+
+function appendLog(line) {
+  if (!logEl) logEl = document.getElementById("log");
+  if (logEl.textContent === "等待輸入...") logEl.textContent = "";
+  logEl.textContent += line + "\n";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function resetUI() {
+  cumulativeState = {};
+  logEl = document.getElementById("log");
+  logEl.textContent = "等待輸入...";
+  document.getElementById("status-bar").classList.add("hidden");
+  document.getElementById("result").classList.add("hidden");
+  document.getElementById("error").classList.add("hidden");
+  document.getElementById("log-status").textContent = "啟動中...";
+  renderAgentCards({}, null);
+}
+
+function showInit(data) {
+  document.getElementById("status-bar").classList.remove("hidden");
+  document.getElementById("job-id").textContent = `job_id: ${data.job_id}`;
+  const modeBadge = document.getElementById("mode-badge");
+  if (data.mode === "REAL") {
+    modeBadge.innerHTML = `<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold">REAL · Anthropic API</span>`;
+  } else {
+    modeBadge.innerHTML = `<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold">MOCK · canned 不打 API</span>`;
+  }
+  document.getElementById("log-status").textContent = "agent 工作中...";
+}
+
+function showState(data) {
+  cumulativeState = { ...cumulativeState, ...data };
+  cumulativeState.__details = deriveDetails(cumulativeState);
+  const running = currentRunningAgent(cumulativeState);
+  renderAgentCards(cumulativeState, running);
+}
+
+function showDone() {
+  document.getElementById("log-status").textContent = "完成 ✓";
+  const r = document.getElementById("result");
+  r.classList.remove("hidden");
+
+  const prd = cumulativeState.prd || {};
+  const tr = cumulativeState.test_results || {};
+  const total = (tr.passed || 0) + (tr.failed || 0);
+
+  document.getElementById("result-title").textContent = prd.name_tc || "完成";
+  document.getElementById("result-sub").textContent = `${prd.agent_type || "?"} · ${prd.subcategory || "?"} · 信心 ${((prd.confidence || 0) * 100).toFixed(0)}%`;
+  document.getElementById("r-files").textContent = cumulativeState.file_count || 0;
+  document.getElementById("r-tests").textContent = `${tr.passed || 0}/${total}`;
+  document.getElementById("r-iter").textContent = (cumulativeState.iteration || 0) + 1;
+  const urlEl = document.getElementById("r-url");
+  const url = cumulativeState.deploy_url || "(無)";
+  urlEl.textContent = url;
+  if (url.startsWith("http")) {
+    urlEl.href = url.split(" ")[0];
+  }
+  const list = document.getElementById("r-file-list");
+  list.innerHTML = "";
+  (cumulativeState.file_names || []).forEach(name => {
+    const li = document.createElement("li");
+    li.textContent = "• " + name;
+    li.className = "font-mono text-xs";
+    list.appendChild(li);
+  });
+
+  // Set running indicator off
+  renderAgentCards(cumulativeState, null);
+}
+
+function showError(msg) {
+  document.getElementById("error").classList.remove("hidden");
+  document.getElementById("error-msg").textContent = msg;
+  document.getElementById("log-status").textContent = "錯誤";
+}
+
+function onMessage(e) {
+  const data = JSON.parse(e.data);
+  if (data.type === "init") showInit(data);
+  else if (data.type === "log") appendLog(data.line);
+  else if (data.type === "state") showState(data);
+  else if (data.type === "done") { showDone(); evtSource?.close(); }
+  else if (data.type === "error") { showError(data.message); evtSource?.close(); }
+}
+
+function startRun() {
+  const req = document.getElementById("req").value.trim();
+  if (!req) {
+    document.getElementById("req").focus();
+    return;
+  }
+  if (evtSource) evtSource.close();
+  resetUI();
+  evtSource = new EventSource(`/api/factory/stream?req=${encodeURIComponent(req)}`);
+  evtSource.onmessage = onMessage;
+  evtSource.onerror = () => {
+    document.getElementById("log-status").textContent = "連線中斷";
+    evtSource?.close();
+  };
+}
+
+document.getElementById("run").addEventListener("click", startRun);
+document.getElementById("req").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") startRun();
+});
+document.querySelectorAll(".example").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.getElementById("req").value = btn.dataset.text;
+    document.getElementById("req").focus();
+  });
+});
+
+// initial render
+renderAgentCards();
+</script>
+</body>
+</html>

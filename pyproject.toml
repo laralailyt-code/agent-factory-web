@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Add project root to sys.path so `from factory.xxx import ...` works.
+# Without this, you'd need `python -m pytest` instead of bare `pytest`.
+pythonpath = ["."]
+testpaths = ["tests"]

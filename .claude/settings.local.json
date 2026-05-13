@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pytest tests/test_tools.py -v)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pytest tests/ -v)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m factory.run \"���ӭ쪫�ƭ��I�iĵ\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.run \"做個原物料風險告警\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.run \"做個會故意 import 錯誤的 demo\")",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; print\\('httpx', httpx.__version__\\)\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.check_telegram)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -c \"import os, json; from dotenv import load_dotenv; load_dotenv\\(\\); import httpx; tok = os.getenv\\('TG_BOT_TOKEN'\\); r = httpx.get\\(f'https://api.telegram.org/bot{tok}/getUpdates', timeout=10.0\\); data = r.json\\(\\); print\\(json.dumps\\(data, ensure_ascii=False, indent=2\\)\\)\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.bot)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -u -m factory.bot)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pip install pyinstaller pandas openpyxl 2>&1)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; $env:RUN_PYINSTALLER=\"true\"; .venv\\\\Scripts\\\\python.exe -m factory.run \"做一個 Excel 比對小程式 · 庫存有機密 · 要桌面 .exe\")",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pytest tests/ -q)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.check_vercel)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.check_render)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; $env:REAL_DEPLOY=\"true\"; .venv\\\\Scripts\\\\python.exe -m factory.run \"做個競品戰情室 · 盯 5 家對手價格新品新聞\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -c \"import os, httpx, time; from dotenv import load_dotenv; load_dotenv\\(\\); tok=os.getenv\\('VERCEL_TOKEN'\\); url='af-war-room-4014eada-lara-s-projects3.vercel.app'; H={'Authorization': f'Bearer {tok}'}; r=httpx.get\\(f'https://api.vercel.com/v13/deployments/{url}', headers=H, timeout=10\\); d=r.json\\(\\); print\\('state:', d.get\\('readyState'\\) or d.get\\('state'\\)\\); print\\('url:  https://'+d.get\\('url','?'\\)\\); print\\('inspectorUrl:', d.get\\('inspectorUrl','?'\\)\\)\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -c \"import os, httpx, json; from dotenv import load_dotenv; load_dotenv\\(\\); tok=os.getenv\\('VERCEL_TOKEN'\\); H={'Authorization': f'Bearer {tok}'}; r=httpx.get\\('https://api.vercel.com/v6/deployments?app=af-war-room-4014eada&limit=1', headers=H, timeout=10\\); d=r.json\\(\\).get\\('deployments',[]\\); print\\(json.dumps\\(d[0] if d else {}, indent=2\\)[:2000]\\)\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.poll_vercel af-war-room-8363c742)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.vercel_logs 26pjYmGKz6r5FzUz3DdfD5QGfRHh 2>&1 | Select-Object -Last 40)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.vercel_logs dpl_26pjYmGKz6r5FzUz3DdfD5QGfRHh 2>&1 | Select-Object -Last 40)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.poll_vercel af-war-room-28166ff1)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.poll_vercel af-war-room-a9fffdce)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.poll_vercel af-war-room-d4c82d12)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.clean_vercel --keep af-war-room-d4c82d12 --dry-run)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.clean_vercel --keep af-war-room-d4c82d12)",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -m pip install fastapi \"uvicorn[standard]\" 2>&1)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -u -m factory.web)",
+      "PowerShell(Start-Sleep -Seconds 4; try { $r = Invoke-WebRequest -Uri \"http://localhost:8000/\" -TimeoutSec 5 -ErrorAction Stop; Write-Output \"HTTP $\\($r.StatusCode\\) · $\\($r.Content.Length\\) bytes\" } catch { Write-Output \"Error: $_\" })",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.get\\('http://localhost:8000/', timeout=5\\); print\\(f'HTTP {r.status_code} �P {len\\(r.content\\)} bytes �P title in body:', '<title>' in r.text\\)\")",
+      "PowerShell(.venv\\\\Scripts\\\\python.exe -c \"import httpx; r = httpx.get\\('http://localhost:8000/api/factory/stream', params={'req': '���ӭ쪫�ƭ��I�iĵ'}, timeout=15\\); print\\(f'HTTP {r.status_code} �P {len\\(r.text\\)} chars'\\); print\\('--- first 600 chars ---'\\); print\\(r.text[:600]\\)\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.check_github)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; $env:REAL_DEPLOY=\"true\"; .venv\\\\Scripts\\\\python.exe -m factory.run \"做個原物料風險告警 · 戰爭油價即時推送\")",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.poll_render srv-d81sff03kofs73c3ishg)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.check_anthropic)",
+      "PowerShell($env:PYTHONIOENCODING=\"utf-8\"; .venv\\\\Scripts\\\\python.exe -m factory.deploy_factory_web)"
+    ]
+  }
+}
