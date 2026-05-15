@@ -12,9 +12,12 @@ Set ANTHROPIC_API_KEY in .env to use real Claude.
 Set MOCK_LLM=true to use canned responses (no API calls · for dev/test).
 """
 from __future__ import annotations
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import os
 import json
 import re
+import time
 from typing import Optional
 
 try:
@@ -192,11 +195,119 @@ def _get_client():
     global _client
     if _client is None:
         from anthropic import Anthropic
-        kwargs = {}
+        kwargs = {
+            # Keep retries visible in Agent Factory logs instead of hiding them
+            # inside the SDK. create_message_with_retry handles 429s centrally.
+            "max_retries": 0,
+            # 600s (10 min) · Builder one-shot 16K tokens 輸出可能要 5-8 分鐘
+            "timeout": 600.0,
+        }
         if ANTHROPIC_BASE_URL:
             kwargs["base_url"] = ANTHROPIC_BASE_URL
         _client = Anthropic(**kwargs)  # reads ANTHROPIC_API_KEY from env
     return _client
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _rate_limit_attempts() -> int:
+    return max(1, _env_int("ANTHROPIC_RATE_LIMIT_MAX_ATTEMPTS", 4))
+
+
+def _rate_limit_base_wait() -> float:
+    return max(1.0, _env_float("ANTHROPIC_RATE_LIMIT_WAIT_SECONDS", 75.0))
+
+
+def _rate_limit_max_wait() -> float:
+    return max(_rate_limit_base_wait(), _env_float("ANTHROPIC_RATE_LIMIT_MAX_WAIT_SECONDS", 240.0))
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    if status_code == 429 or response_status == 429:
+        return True
+
+    text = f"{type(exc).__name__}: {exc} {getattr(exc, 'body', '')}".lower()
+    return "rate limit" in text or "ratelimit" in text or "ratelimitreached" in text
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or getattr(exc, "headers", None)
+    if not headers:
+        return None
+
+    value = None
+    try:
+        value = headers.get("retry-after") or headers.get("Retry-After")
+    except AttributeError:
+        return None
+    if not value:
+        return None
+
+    try:
+        return max(1.0, float(value))
+    except ValueError:
+        pass
+
+    try:
+        reset_at = parsedate_to_datetime(value)
+        if reset_at.tzinfo is None:
+            reset_at = reset_at.replace(tzinfo=timezone.utc)
+        wait = (reset_at - datetime.now(timezone.utc)).total_seconds()
+        return max(1.0, wait)
+    except (TypeError, ValueError):
+        return None
+
+
+def _compact_error(exc: Exception) -> str:
+    text = " ".join(str(exc).split())
+    if not text:
+        return type(exc).__name__
+    return text[:220]
+
+
+def create_message_with_retry(*, log: Optional[list[str]] = None, **kwargs):
+    """Call Anthropic messages.create with visible, conservative 429 handling."""
+    attempts = _rate_limit_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            return _get_client().messages.create(**kwargs)
+        except Exception as exc:
+            if not _is_rate_limit_error(exc) or attempt >= attempts:
+                if _is_rate_limit_error(exc) and log is not None:
+                    log.append("  ✗ Claude rate limit 429 · 已達重試上限")
+                    log.append(f"     {_compact_error(exc)}")
+                raise
+
+            retry_after = _retry_after_seconds(exc)
+            fallback_wait = min(_rate_limit_max_wait(), _rate_limit_base_wait() * attempt)
+            wait_seconds = min(_rate_limit_max_wait(), retry_after or fallback_wait)
+
+            if log is not None:
+                log.append(
+                    f"  ⏳ Claude rate limit 429 · 等 {wait_seconds:.0f}s 後重試 "
+                    f"({attempt}/{attempts - 1})"
+                )
+                log.append(f"     {_compact_error(exc)}")
+
+            time.sleep(wait_seconds)
+
+    raise RuntimeError("unreachable: create_message_with_retry exhausted attempts")
 
 
 # ============ PUBLIC API ============
@@ -208,6 +319,7 @@ def call_llm(
     max_tokens: int = 2048,
     mock_key: Optional[str] = None,
     mock_user_request: Optional[str] = None,
+    log: Optional[list[str]] = None,
 ) -> str:
     """Call Claude with a system + user prompt. Returns text."""
     if is_mock():
@@ -219,7 +331,8 @@ def call_llm(
                 return json.dumps(MOCK_DESIGNS.get(category_key, MOCK_DESIGNS["_default"]), ensure_ascii=False)
         return f"[MOCK] {user[:80]}..."
 
-    resp = _get_client().messages.create(
+    resp = create_message_with_retry(
+        log=log,
         model=MODELS[model],
         max_tokens=max_tokens,
         system=system,
@@ -232,22 +345,52 @@ def call_llm_json(
     system: str,
     user: str,
     model: str = "sonnet",
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
     mock_key: Optional[str] = None,
     mock_user_request: Optional[str] = None,
+    log: Optional[list[str]] = None,
 ) -> dict:
-    """Like call_llm but parses JSON out of the response."""
-    text = call_llm(
-        system + "\n\nIMPORTANT: respond with valid JSON only, no preamble, no markdown fences.",
-        user,
-        model=model,
-        max_tokens=max_tokens,
-        mock_key=mock_key,
-        mock_user_request=mock_user_request,
+    """Like call_llm but parses JSON out of the response.
+
+    Robust against:
+    - Markdown fence wrapping (```json ... ```)
+    - Opus being verbose and overflowing max_tokens (auto-retries with 2x cap)
+    - JSON parse errors (one self-correct retry with explicit error feedback)
+    """
+    enhanced_system = (
+        system + "\n\nIMPORTANT: respond with valid JSON only, no preamble, no markdown fences."
     )
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-    text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
+
+    def _strip_fences(t: str) -> str:
+        t = re.sub(r"^```(?:json)?\s*", "", t.strip())
+        t = re.sub(r"\s*```$", "", t)
+        return t
+
+    text = call_llm(
+        enhanced_system, user,
+        model=model, max_tokens=max_tokens,
+        mock_key=mock_key, mock_user_request=mock_user_request,
+        log=log,
+    )
+    try:
+        return json.loads(_strip_fences(text))
+    except json.JSONDecodeError as e:
+        # One self-correct retry: tell Claude where it broke + give 2x max_tokens room
+        retry_system = (
+            enhanced_system
+            + f"\n\n你上次回應的 JSON 解析失敗(錯誤類型: {type(e).__name__}, "
+            f"位置 char {e.pos})。請只輸出**完整、合法**的 JSON,確保:"
+            "\n- 所有 string 用引號正確結尾"
+            "\n- 所有 brackets/braces 配對完整"
+            "\n- 不要切斷在 string 中間"
+        )
+        text2 = call_llm(
+            retry_system, user,
+            model=model, max_tokens=max_tokens * 2,
+            mock_key=mock_key, mock_user_request=mock_user_request,
+            log=log,
+        )
+        return json.loads(_strip_fences(text2))
 
 
 def is_mock() -> bool:
@@ -277,4 +420,6 @@ def mode_status() -> dict:
         "has_anthropic_key": bool(os.getenv("ANTHROPIC_API_KEY")),
         "anthropic_base_url": ANTHROPIC_BASE_URL,
         "model": MODELS.get("sonnet", "?"),
+        "rate_limit_max_attempts": _rate_limit_attempts(),
+        "rate_limit_wait_seconds": _rate_limit_base_wait(),
     }

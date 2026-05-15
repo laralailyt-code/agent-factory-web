@@ -1,4 +1,4 @@
-"""LangGraph state machine — wires the 5 agents into a pipeline.
+"""LangGraph state machine — wires the agents into a quality-aware pipeline.
 
 D2.4: Tester → Builder self-correction loop (max 3 attempts).
 """
@@ -8,10 +8,14 @@ from langgraph.graph import StateGraph, START, END
 from .state import FactoryState
 from .nodes import (
     clarifier_node,
+    analyst_node,
     architect_node,
     builder_node,
     tester_node,
+    reviewer_node,
     deployer_node,
+    verifier_node,
+    learner_node,
 )
 from .nodes.tester import MAX_ITERATIONS
 
@@ -36,20 +40,28 @@ def build_graph():
     g = StateGraph(FactoryState)
 
     g.add_node("clarifier", clarifier_node)
+    g.add_node("analyst", analyst_node)
     g.add_node("architect", architect_node)
     g.add_node("builder", builder_node)
     g.add_node("tester", tester_node)
+    g.add_node("reviewer", reviewer_node)
     g.add_node("deployer", deployer_node)
+    g.add_node("verifier", verifier_node)
+    g.add_node("learner", learner_node)
 
     g.add_edge(START, "clarifier")
-    g.add_edge("clarifier", "architect")
+    g.add_edge("clarifier", "analyst")
+    g.add_edge("analyst", "architect")
     g.add_edge("architect", "builder")
     g.add_edge("builder", "tester")
+    g.add_edge("tester", "reviewer")
     g.add_conditional_edges(
-        "tester",
+        "reviewer",
         route_after_tester,
         {"deployer": "deployer", "builder": "builder"},
     )
-    g.add_edge("deployer", END)
+    g.add_edge("deployer", "verifier")
+    g.add_edge("verifier", "learner")
+    g.add_edge("learner", END)
 
     return g.compile()

@@ -10,3 +10,7 @@ build/
 dist/
 *.spec
 .DS_Store
+
+# 本機暫存 / runtime 資料 · 不推上雲
+data/
+logs/

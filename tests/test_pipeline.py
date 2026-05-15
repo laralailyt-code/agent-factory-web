@@ -3,9 +3,12 @@ for each of the 3 demo paths.
 """
 import os
 os.environ["MOCK_LLM"] = "true"
+os.environ["FACTORY_SKIP_NPM_BUILD"] = "true"
+os.environ["FACTORY_MEMORY_DIR"] = "generated/test_memory"
 
 import ast
 from factory.graph import build_graph
+from factory.nodes.tester import _static_next_errors
 
 
 def _run(prompt: str, job_id: str) -> dict:
@@ -35,6 +38,9 @@ def test_war_room_pipeline():
     prd = result["prd"]
     assert prd["agent_type"] == "monitoring"
     assert prd["subcategory"] == "war_room"
+    assert "_critique" in prd
+    assert 0 <= prd["confidence"] <= 1
+    assert prd["_critique"]["confidence"] >= 70
     assert "package.json" in result["files"]
     assert "app/page.tsx" in result["files"]
 
@@ -75,3 +81,12 @@ def test_pipeline_reaches_done():
     result = _run("做個競品戰情室", "test_done")
     assert result["current_stage"] == "done"
     assert result["test_results"]["failed"] == 0
+
+
+def test_next_client_page_route_config_is_rejected():
+    """Client components cannot export Next route config such as revalidate."""
+    errors = _static_next_errors({
+        "package.json": '{"scripts":{"build":"next build"}}',
+        "app/page.tsx": '"use client";\n\nexport const revalidate = 0;\nexport default function Page(){ return null; }\n',
+    })
+    assert any("revalidate" in err for err in errors)

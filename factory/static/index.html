@@ -238,10 +238,13 @@
 <script>
 const AGENTS = [
   { key: "clarifier", name: "Clarifier", emoji: "🧠", role: "需求收斂", field: "prd" },
+  { key: "analyst",   name: "Analyst",   emoji: "🔎", role: "領域補強", field: "analysis" },
   { key: "architect", name: "Architect", emoji: "📐", role: "系統設計", field: "design" },
   { key: "builder",   name: "Builder",   emoji: "⚙️", role: "寫 code",  field: "file_count" },
   { key: "tester",    name: "Tester",    emoji: "🧪", role: "跑測試",   field: "test_results" },
+  { key: "reviewer",  name: "Reviewer",  emoji: "🧐", role: "品質審查", field: "quality_review" },
   { key: "deployer",  name: "Deployer",  emoji: "🚀", role: "部署上線", field: "deploy_url" },
+  { key: "verifier",  name: "Verifier",  emoji: "🔍", role: "上線驗證", field: "verification" },
 ];
 
 const STATUS_COLORS = {
@@ -278,6 +281,7 @@ function renderAgentCards(state = {}, currentRunning = null) {
 function deriveDetails(state) {
   const d = {};
   if (state.prd) d.clarifier = `${state.prd.name_tc || "?"} · ${state.prd.agent_type || "?"}`;
+  if (state.analysis) d.analyst = `${state.analysis.subcategory || "?"} · ${(state.analysis.workflow || []).length} 步流程`;
   if (state.design) d.architect = `${state.design.deploy_target || "?"} · ${(state.design.file_plan || []).length} 檔`;
   if (state.file_count) d.builder = `寫完 ${state.file_count} 個檔案`;
   if (state.test_results) {
@@ -285,9 +289,17 @@ function deriveDetails(state) {
     const total = (tr.passed || 0) + (tr.failed || 0);
     d.tester = `${tr.passed || 0}/${total} 通過${tr.failed ? ` · ${tr.failed} fail` : ""}`;
   }
+  if (state.quality_review) {
+    const qr = state.quality_review;
+    d.reviewer = `${qr.grade || "?"} · ${qr.score ?? "?"}%`;
+  }
   if (state.deploy_url) {
     const isMock = state.deploy_url.includes("[MOCK");
     d.deployer = isMock ? "MOCK URL 完成" : "真實部署完成";
+  }
+  if (state.verification) {
+    const v = state.verification;
+    d.verifier = v.skipped ? "跳過 mock URL" : `${v.grade || "?"} · ${v.score ?? "?"}%`;
   }
   return d;
 }

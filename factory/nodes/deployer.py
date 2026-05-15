@@ -12,6 +12,7 @@ import base64
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from ..state import FactoryState
 
@@ -164,9 +165,97 @@ def _real_vercel_deploy(out_dir: Path, prd: dict, job_id: str, log: list[str]) -
         return None
 
     url = raw_url if raw_url.startswith("http") else f"https://{raw_url}"
+    deployment_id = data.get("id") or data.get("uid")
     log.append(f"  ✓ Vercel 部署觸發成功: {url}")
-    log.append(f"     build 在雲端進行中,約 30-90 秒後完全 ready · Inspector: https://vercel.com/{data.get('creator', {}).get('username', '?')}/{project_name}")
+    log.append(f"     Inspector: https://vercel.com/{data.get('creator', {}).get('username', '?')}/{project_name}")
+
+    # 自動關掉 Vercel hobby 預設的 SSO Protection,讓 URL 公開可訪問
+    # (不關的話訪客打開會看到 401 Authentication Required · demo 廢掉)
+    _vercel_disable_protection(token, project_name, log)
+
+    # 等 Vercel build 真的 ready 才回傳 · 否則 Verifier 太早跑會看到 404 / build 中頁面 → 誤報「不完整」
+    if deployment_id:
+        _vercel_wait_ready(token, deployment_id, log)
     return url
+
+
+def _vercel_wait_ready(token: str, deployment_id: str, log: list[str], max_wait_seconds: int = 180) -> None:
+    """Poll Vercel until deployment state ∈ {READY, ERROR, CANCELED} or timeout.
+
+    Why: POST /v13/deployments returns immediately with state=QUEUED/INITIALIZING.
+    Build takes 30-90s. If Verifier hits the URL during build, it gets 404 / a
+    "Building..." page → false-positive "Verifier 不完整" alert on Telegram.
+    """
+    import time as _t
+    headers = {"Authorization": f"Bearer {token}"}
+    start = _t.time()
+    last_state = None
+    while _t.time() - start < max_wait_seconds:
+        try:
+            r = httpx.get(
+                f"https://api.vercel.com/v13/deployments/{deployment_id}",
+                headers=headers,
+                timeout=15.0,
+            )
+            if r.status_code == 200:
+                state = r.json().get("readyState") or r.json().get("state") or "?"
+                if state != last_state:
+                    log.append(f"     ⏳ Vercel build state: {state}")
+                    last_state = state
+                if state in ("READY", "ERROR", "CANCELED"):
+                    elapsed = int(_t.time() - start)
+                    if state == "READY":
+                        log.append(f"  ✓ Vercel build READY ({elapsed}s) · Verifier 可以放心驗了")
+                    else:
+                        log.append(f"  ✗ Vercel build {state} ({elapsed}s) · Verifier 接下來會抓到 build 失敗")
+                    return
+        except Exception:
+            pass
+        _t.sleep(5.0)
+    log.append(f"     ⚠️  Vercel build 等 {max_wait_seconds}s 還沒 ready · 直接放行 Verifier(可能誤報)")
+
+
+def _vercel_disable_protection(token: str, project_name: str, log: list[str]) -> None:
+    """Disable Vercel SSO + password protection on the project we just created.
+
+    Vercel hobby/team tier defaults to ssoProtection=all_except_custom_domains which
+    forces visitors to log in. For our demos we always want public access.
+
+    Project record is created async — first PATCH right after POST /v13/deployments
+    sometimes returns 200 but the value doesn't persist. So we retry up to 4 times
+    and verify via GET that ssoProtection is actually null before returning.
+    """
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    max_attempts = 4
+    for attempt in range(1, max_attempts + 1):
+        # initial settle delay (project just created)
+        time.sleep(3.0 if attempt == 1 else 5.0)
+        try:
+            r = httpx.patch(
+                f"https://api.vercel.com/v9/projects/{project_name}",
+                headers=headers,
+                json={"ssoProtection": None, "passwordProtection": None},
+                timeout=15.0,
+            )
+            if r.status_code != 200:
+                if attempt == max_attempts:
+                    log.append(f"     ⚠️  SSO 自動關失敗 (PATCH HTTP {r.status_code}) · 訪客可能看到 401")
+                continue
+            # verify: GET project and check ssoProtection actually null
+            g = httpx.get(
+                f"https://api.vercel.com/v9/projects/{project_name}",
+                headers=headers,
+                timeout=15.0,
+            )
+            if g.status_code == 200 and g.json().get("ssoProtection") is None:
+                log.append(f"  🔓 SSO Protection 已關 (第 {attempt} 次成功) · URL 公開可訪問")
+                return
+            if attempt == max_attempts:
+                state = g.json().get("ssoProtection") if g.status_code == 200 else "GET failed"
+                log.append(f"     ⚠️  SSO 試 {max_attempts} 次都沒關掉 · 目前狀態: {state} · 訪客可能看到 401")
+        except Exception as e:
+            if attempt == max_attempts:
+                log.append(f"     ⚠️  SSO 自動關出錯: {type(e).__name__}: {e}")
 
 
 # ============ D3.3 · Render real deploy (GitHub repo + Render service) ============
@@ -421,6 +510,6 @@ def deployer_node(state: FactoryState) -> FactoryState:
     return {
         **state,
         "deploy_url": deploy_url,
-        "current_stage": "done",
+        "current_stage": "verifier",
         "log": log,
     }

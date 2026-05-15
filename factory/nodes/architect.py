@@ -1,8 +1,27 @@
 """Architect — designs the system based on the PRD."""
 from __future__ import annotations
+import json
+import time
 from ..state import FactoryState
-from ..llm import call_llm_json
+from ..llm import call_llm_json, is_mock, MOCK_DESIGNS
 from ..categories import CATEGORIES_BY_KEY
+
+
+# REAL 模式下,Architect 進入 Claude call 前等 65 秒 · 確保 Azure 60s rolling window
+# 完全清空 Clarifier 已用的 input tokens
+_INTER_AGENT_DELAY = 65.0
+
+
+def _add_quality_support_files(design: dict, agent_type: str) -> None:
+    """Ensure every generated product includes docs/config/sample data."""
+    file_plan = list(design.get("file_plan", []) or [])
+    additions = ["README.md", "sample_data.json"]
+    if agent_type in {"monitoring", "website", "automation"}:
+        additions.append(".env.example")
+    for name in additions:
+        if name not in file_plan:
+            file_plan.append(name)
+    design["file_plan"] = file_plan[:16]
 
 
 SYSTEM = """你是 Agent Factory 的 Architect。給你一個 PRD,你要決定:
@@ -50,28 +69,71 @@ def architect_node(state: FactoryState) -> FactoryState:
 
     prd = state["prd"]
     user_request = state.get("user_request", "")
+    analysis = state.get("analysis", {}) or {}
+    acceptance_criteria = state.get("acceptance_criteria", []) or []
+
+    # 給 Azure 60s rolling window 完全清空 Clarifier 的 input tokens
+    if not is_mock():
+        log.append(f"  ⏳ 等 Azure TPM 視窗清空 {_INTER_AGENT_DELAY:.0f}s...")
+        time.sleep(_INTER_AGENT_DELAY)
 
     design = call_llm_json(
         system=SYSTEM,
-        user=f"PRD:\n{prd}\n\n請設計系統。",
+        user=(
+            "請根據 PRD + Analyst brief 設計系統。"
+            "\n\nPRD:\n"
+            f"{json.dumps(prd, ensure_ascii=False, indent=2)}"
+            "\n\nAnalyst brief:\n"
+            f"{json.dumps(analysis, ensure_ascii=False, indent=2)}"
+            "\n\nAcceptance criteria:\n"
+            f"{json.dumps(acceptance_criteria, ensure_ascii=False, indent=2)}"
+        ),
         model="sonnet",
         mock_key="architect",
         mock_user_request=user_request,
+        log=log,
     )
 
-    # If the PRD has a subcategory, sanity-check stack against the registry
+    normalized = False
+
+    # If the PRD has a subcategory, keep the design inside the supported product templates.
+    # This prevents the real model from expanding a simple 8-file product into a huge
+    # 50+ file app that the constrained Builder/Azure quota cannot finish reliably.
     subcat_key = prd.get("subcategory")
     if subcat_key and subcat_key in CATEGORIES_BY_KEY:
         cat = CATEGORIES_BY_KEY[subcat_key]
-        if not design.get("deploy_target"):
+        template = MOCK_DESIGNS.get(subcat_key)
+        if template:
+            for key in ("stack", "deploy_target", "api_routes", "file_plan", "distribution"):
+                value = template.get(key)
+                if isinstance(value, list):
+                    design[key] = list(value)
+                elif value is not None:
+                    design[key] = value
+            normalized = True
+        else:
             design["deploy_target"] = cat.deploy_target
-        if not design.get("stack"):
             design["stack"] = list(cat.tech_hint)
+            file_plan = design.get("file_plan", [])
+            if len(file_plan) > 16:
+                design["file_plan"] = file_plan[:16]
+                normalized = True
+
+    _add_quality_support_files(design, prd.get("agent_type", "monitoring"))
+    if acceptance_criteria:
+        design["acceptance_criteria"] = list(acceptance_criteria)
+    if analysis:
+        design["analysis_summary"] = {
+            "audience": analysis.get("audience"),
+            "output_requirements": analysis.get("output_requirements", []),
+            "quality_keywords": analysis.get("quality_keywords", []),
+        }
 
     log.append(
         f"✓ Architect: {design.get('deploy_target', '?')} · "
         f"{len(design.get('file_plan', []))} 個檔案 · "
         f"stack: {', '.join(design.get('stack', [])[:3])}"
+        + (" · registry normalized" if normalized else "")
     )
 
     return {

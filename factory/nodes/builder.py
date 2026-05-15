@@ -12,10 +12,18 @@ D2.4: 若 state["test_results"]["failed"] > 0(retry 進來),會把 errors 加進
 """
 from __future__ import annotations
 import json
+import re
+import time
 from pathlib import Path
 from ..state import FactoryState
-from ..llm import is_mock, _get_client, MODELS
+from ..llm import is_mock, create_message_with_retry, MODELS
+from ..memory import format_lessons_for_prompt
 from ..tools import write_file, run_command, execute_tool, TOOLS_SCHEMA
+
+
+# REAL 模式下,Builder 進入 Claude call 前等 65 秒 · 給 Azure TPM 視窗(2000/60s)
+# 完全清空 Clarifier + Architect 已用的 token
+_BUILDER_STARTUP_DELAY = 65.0
 
 
 BUILDER_SYSTEM = """你是 Agent Factory 的 Builder agent。給你 PRD 和系統設計,你要把全部檔案寫到 sandbox。
@@ -1230,6 +1238,48 @@ def _read_sandbox_files(job_id: str) -> dict[str, str]:
 
 # ============ MOCK AGENT LOOP ============
 
+def _fallback_file_content(state: FactoryState, name: str) -> str:
+    prd = state.get("prd", {}) or {}
+    analysis = state.get("analysis", {}) or {}
+    criteria = state.get("acceptance_criteria", []) or []
+
+    if name.lower().endswith("readme.md"):
+        workflow = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(analysis.get("workflow", []) or []))
+        checklist = "\n".join(f"- {item}" for item in criteria)
+        return (
+            f"# {prd.get('name_tc', 'Agent Factory 產物')}\n\n"
+            f"{prd.get('summary', '自動產生的業務工具。')}\n\n"
+            "## 目標使用者\n"
+            f"{analysis.get('audience', '一般使用者')}\n\n"
+            "## 使用流程\n"
+            f"{workflow or '1. 啟動服務\n2. 查看首頁或 dashboard\n3. 依提示設定資料來源'}\n\n"
+            "## 驗收標準\n"
+            f"{checklist or '- 首頁可 demo\n- 有範例資料\n- 有中文錯誤提示'}\n"
+        )
+
+    if name == ".env.example":
+        return (
+            "# Agent Factory generated config\n"
+            "PORT=8000\n"
+            "SLACK_WEBHOOK_URL=\n"
+            "TG_BOT_TOKEN=\n"
+            "TG_CHAT_ID=\n"
+        )
+
+    if name.lower().endswith("sample_data.json"):
+        payload = {
+            "app": prd.get("name_tc", "demo"),
+            "subcategory": prd.get("subcategory", "_default"),
+            "items": [
+                {"name": "示範項目 A", "status": "正常", "note": "可 demo 的範例資料"},
+                {"name": "示範項目 B", "status": "注意", "note": "用於驗證 UI 與 fallback"},
+            ],
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+
+    return f"# auto-generated stub for {name}\n"
+
+
 def _builder_mock(state: FactoryState, job_id: str, iteration: int, log: list[str]) -> dict[str, str]:
     """Simulate the agent loop in mock mode: real tool calls via tools.py,
     but file contents come from MOCK_FILES_BY_CATEGORY."""
@@ -1244,7 +1294,7 @@ def _builder_mock(state: FactoryState, job_id: str, iteration: int, log: list[st
     tool_calls = 0
 
     for name in file_plan:
-        content = bundle.get(name, f"# auto-generated stub for {name}\n")
+        content = bundle.get(name, _fallback_file_content(state, name))
         if inject_fail and name == "main.py":
             content = content + "\n# D2.4 demo: intentional syntax error\nthis is not valid python at all !!!\n"
 
@@ -1270,92 +1320,217 @@ def _builder_mock(state: FactoryState, job_id: str, iteration: int, log: list[st
     return written
 
 
-# ============ REAL AGENT LOOP ============
+# ============ REAL ONE-SHOT BUILDER ============
+# 為什麼不用 agent loop?
+#   主辦 Azure endpoint 限制 2000 input tokens / 60 秒(TPM)。
+#   原本 agent loop 每次 tool_call 都把對話歷史整包傳回去 → 第 4-5 次就爆 input quota。
+#   改成「一次 Claude call · 輸出所有檔案的 JSON」 → 單 call ~1500 input 不撞牆。
+#   故事還是 5-agent · Builder 仍真用 Claude · 只是寫法 batch 不是 streaming。
+
+BUILDER_ONESHOT_SYSTEM = """你是 Agent Factory 的 Builder。給你 PRD + Design + 檔案清單,
+你一次輸出所有檔案的完整內容,以 JSON 格式。
+
+嚴格格式(只回 JSON · 不要任何前言 / 解釋 / markdown fence):
+{
+  "files": [
+    {"path": "main.py", "content": "完整檔案內容..."},
+    {"path": "fetcher.py", "content": "..."}
+  ]
+}
+
+規則:
+- 每個檔案完整可跑 · 不要 TODO · 不要省略
+- 嚴格遵守 design.file_plan 列表 · 不要少寫任何檔案
+- 必須滿足 Analyst brief 與 acceptance criteria,不能只做表面 demo
+- README.md 要清楚說明目標使用者、設定、部署、限制與 demo 流程
+- sample_data.json 要能支撐首頁/測試/fallback,不得空陣列
+- Python 用 type hints · 不要 import 不存在的套件
+- TypeScript/JavaScript 確保語法正確
+- 不要解釋 · 只回完整 JSON
+
+⚠️ 重要:Web 服務必須包含 HTML 首頁
+如果產出物是 FastAPI / Flask / Next.js 等 web 服務,main.py(或對應的 app/page.tsx)**必須**:
+1. 有一個根路由 `@app.get("/", response_class=HTMLResponse)`(FastAPI)或 page.tsx(Next.js)
+2. 回傳完整 HTML(內嵌 Tailwind CDN: <script src="https://cdn.tailwindcss.com"></script>)
+3. HTML 有 hero banner + 卡片式呈現主要資料 + 紫色強調色 + 圓角 + 陰影
+4. JavaScript fetch /api/dashboard(或對應 JSON endpoint)並渲染畫面
+5. setInterval 每 30 秒自動 refresh 資料
+
+範例骨架(自行依需求改):
+```python
+from fastapi.responses import HTMLResponse
+
+@app.get("/", response_class=HTMLResponse)
+async def root() -> HTMLResponse:
+    return HTMLResponse('''<!DOCTYPE html>
+<html><head><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-slate-50">
+  <main class="max-w-6xl mx-auto p-8">
+    <h1 class="text-4xl font-bold">...</h1>
+    <div id="data">載入中...</div>
+  </main>
+  <script>
+    async function load() {
+      const r = await fetch("/api/dashboard");
+      // render r.json() into the page
+    }
+    load(); setInterval(load, 30000);
+  </script>
+</body></html>''')
+```
+
+JSON-only API 服務(無 HTML 首頁)會**讓終端用戶看到 404 · 不可接受**。
+
+⚠️ 資料新鮮度 · 必須遵守(這不是 demo · 是實戰):
+- **絕對禁止 hardcode 日期字串**(例如 `"updatedAt": "2024-12-15T08:00:00+08:00"`)· 違規 = 整個 PR 失敗
+- 所有 `updatedAt` / `pubDate` / `time` / `lastUpdated` 欄位:
+  - 第一首選:從真實來源抓(Google News RSS / 官方 API / yfinance)· 用 RSS `<pubDate>` 解出來
+  - 第二選:用 `new Date().toISOString()` (TS) 或 `datetime.utcnow().isoformat()` (Python) 生「現在」
+  - **不可以**寫死任何日期 · 連 fallback / sample / mock 都不行
+- `sample_data.json` 裡的事件 `updatedAt` 必須用 placeholder(例如 `"__NOW__"`),由 server 端 runtime 替換成 `new Date()` · 或乾脆不寫死 events,讓 scraper 完全生成
+- **競品爬蟲**(war_room):design 裡列出的每一家競品都要有自己的 scraper · 不能只做兩家把另外三家留 sample data
+- Google News RSS query 用 `encodeURIComponent('競品名 中文關鍵字')` · 解析 `<item><pubDate>` 把日期帶進來
+- 「每次請求都重新抓」的設定要放對地方(下面 Next.js 段詳述)· 不要 SSG 靜態化
+
+⚠️ TypeScript / Next.js · 必須遵守(防止 build error):
+- `tsconfig.json` 的 `target` **必須是 `"es2020"` 或更新**(`"es5"` 不可 · `regex flag /s` /`/u` / `/d` 都會 build 失敗)
+- `lib`: `["dom", "dom.iterable", "esnext"]` 完整
+- `moduleResolution`: `"bundler"` 或 `"node"`
+- 避免使用 `/regex/s` 這種需要 ES2018+ 的 flag · 改用 `[\\s\\S]` 取代 `.`(更通用)
+- Next.js 14 使用 App Router · `app/page.tsx` + `app/layout.tsx` 都要有 · `app/page.tsx` 是首頁
+- 任何外部 npm 套件都要在 `package.json` 的 `dependencies` 列出 · 不要 import 沒裝的
+- If `app/page.tsx` starts with `"use client"`, do not export Next route config from that file.
+  In client components, never include `export const revalidate`, `export const dynamic`,
+  `export const fetchCache`, or `export const runtime`.
+- For client pages that fetch with `useEffect`, use `fetch(..., { cache: "no-store" })`
+  instead of `export const revalidate = 0`.
+
+⚠️ Next.js Route Segment Config · 放對地方(這條搞錯整個 build 會掛):
+- `export const revalidate` / `export const dynamic` 是 **Route Segment Config** · 只能放在:
+  1. **Server Components**(沒有 `"use client"` 的 `page.tsx` / `layout.tsx`)
+  2. **Route Handlers**(`app/api/*/route.ts`)
+- **絕對不可以**放在 `"use client"` 的檔案 · 否則 Next.js 會把整個 export map 當成 revalidate 值 · 報錯
+  `Invalid revalidate value "[object Object]" on "/" · must be a non-negative number or "false"`
+- 如果 `app/page.tsx` 因為要用 `useState` / `useEffect` 必須是 `"use client"`:
+  - **不要**在 page.tsx 匯出 `revalidate` / `dynamic`
+  - 客戶端不快取的做法:`fetch('/api/...', { cache: 'no-store' })` · 或 `fetch('/api/...?t=' + Date.now())`
+  - 把 `revalidate = 0` 放到 `app/api/*/route.ts` 那層(server 端 cache 控制)
+- 如果是純展示頁(不用 client hooks)· 推薦的 server-side fresh fetch:
+  - `app/page.tsx` **不要**寫 `"use client"`
+  - 頂部 `export const revalidate = 0; export const dynamic = "force-dynamic";`
+  - 用 `async function Page()` 直接 await fetch
+  - `app/api/*/route.ts` 也要 `export const revalidate = 0;` + 回 header `Cache-Control: no-store`
+
+⚠️ 中文為主英文輔助 · 必須遵守:
+- 使用者是台灣採購人員 + 評審 + 公司同事 · **全部 UI 標題 / banner / 卡片標題 / 按鈕 / 提示文字 / footer 都用繁體中文**
+- 新聞 fallback / 模擬資料 / 警報訊息 / log 給人看的部分 → 中文
+- 第三方 API 查詢字串(例如 Google News RSS 的 q 參數)→ 使用中文關鍵字 · 配合 `urllib.parse.quote` 做 URL encode
+- 英文只在技術命名(class name / function name / API path / 程式碼註解)+ 商品縮寫(BRENT / WTI)時保留
+- 雙語標示優先(例如「布蘭特 BRENT」「銅 CU」)讓兩邊都看得懂
+
+⚠️ ASUS 角度 · 商業內容必須從 ASUS 出發:
+- 使用者是 **ASUS 採購部** · Factory 產出的所有內容(競品分析 / 原料風險 / 供應商追蹤 / 戰略建議)都以 ASUS 為「**我方**」
+- **競品**(war_room):是 ASUS 的實際對手 = **ACER · MSI · HP · DELL · Lenovo**(筆電/PC 領域)
+- **建議行動**:從 ASUS 角度寫(例:「加速 ROG 第三季鋪貨」· 因為 ROG 是 ASUS 電競品牌;不要寫「加速 X 品牌鋪貨」這種抽象話)
+- **AI 分析**:對標 ASUS 產品線(ROG / ZenBook / ProArt / VivoBook / TUF Gaming)
+- **原料風險**(raw_material_risk):衝擊要寫「對 ASUS 採購團隊」· 不要寫「對市場」
+- **內部簽核 / KPI 簡報**:符合 ASUS 內部組織(採購單 → 主管 → 採購副總)
+- **個人類產品**(family_photo / personal_budget)不適用此規則 · 維持中性敘事"""
+
 
 def _builder_real(state: FactoryState, job_id: str, iteration: int, log: list[str]) -> dict[str, str]:
-    """Real Claude agent loop with tool use."""
+    """One-shot Claude call · 輸出所有檔案的 JSON · 寫進 sandbox。
+
+    跟原本的 agent loop 比較:
+      - input 不會累積 → 撐得住主辦 endpoint 的 TPM 限制
+      - 單一 call 完成 → 30-60 秒
+      - 仍然真用 Claude 寫 code
+    """
     prd = state["prd"]
     design = state["design"]
+    analysis = state.get("analysis", {}) or {}
+    acceptance_criteria = state.get("acceptance_criteria", []) or []
+    file_plan = design.get("file_plan", [])
+    lessons_context = format_lessons_for_prompt(state)
 
     user_msg = (
         f"PRD:\n{json.dumps(prd, ensure_ascii=False, indent=2)}\n\n"
         f"Design:\n{json.dumps(design, ensure_ascii=False, indent=2)}\n\n"
-        f"請依 design.file_plan,把每個檔案用 write_file 寫到 sandbox。"
-        f"全部寫完後呼叫 submit_done。"
+        f"Analyst brief:\n{json.dumps(analysis, ensure_ascii=False, indent=2)}\n\n"
+        f"Acceptance criteria:\n{json.dumps(acceptance_criteria, ensure_ascii=False, indent=2)}\n\n"
+        f"file_plan(這 {len(file_plan)} 個檔案必須全部產出):\n"
+        f"{json.dumps(file_plan, ensure_ascii=False)}\n\n"
+        f"輸出 JSON,包含所有檔案的完整內容。"
     )
+
+    if lessons_context:
+        lesson_count = sum(1 for line in lessons_context.splitlines() if line.startswith("- "))
+        log.append(f"  Memory: loaded {lesson_count} relevant lesson(s)")
+        user_msg += f"\n\n{lessons_context}"
 
     if iteration > 0:
         prev_errors = state.get("test_results", {}).get("errors", [])
         if prev_errors:
             errors_str = "\n".join(prev_errors)
             user_msg += (
-                f"\n\n⚠️ 上一次測試失敗了 (iteration {iteration - 1}),錯誤如下:\n"
-                f"{errors_str}\n\n請修正後重新 write_file 把整個檔案重寫。"
+                f"\n\n⚠️ 上一次測試失敗 (iteration {iteration - 1}),錯誤:\n"
+                f"{errors_str}\n\n請修正後重寫完整 JSON。"
             )
 
-    client = _get_client()
-    messages: list[dict] = [{"role": "user", "content": user_msg}]
+    # 65 秒冷卻 · 讓 Azure 60s 視窗完全清空 Clarifier + Architect 已用的 tokens
+    log.append(f"  ⏳ 給 Azure TPM 視窗冷卻 {_BUILDER_STARTUP_DELAY:.0f}s · 避免 2000 tokens/60s 上限...")
+    time.sleep(_BUILDER_STARTUP_DELAY)
 
-    max_steps = 30
-    tool_calls = 0
+    log.append(f"  📝 Builder 一次 call 輸出 {len(file_plan)} 個檔案...")
+    resp = create_message_with_retry(
+        log=log,
+        model=MODELS["sonnet"],
+        max_tokens=32000,  # 拉到上限 · war_room 12 檔需要更多空間
+        system=BUILDER_ONESHOT_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+    )
 
-    for _step in range(max_steps):
-        resp = client.messages.create(
-            model=MODELS["sonnet"],
-            max_tokens=4096,
-            system=BUILDER_SYSTEM,
-            tools=TOOLS_SCHEMA,
-            messages=messages,
-        )
+    text = "".join(b.text for b in resp.content if hasattr(b, "text"))
+    stop_reason = getattr(resp, "stop_reason", "?")
+    if stop_reason == "max_tokens":
+        log.append(f"  ⚠️ Claude 回應被 max_tokens 截斷 (回了 {len(text)} chars · stop_reason={stop_reason})")
 
-        # Echo assistant content back into the conversation (required for tool loops).
-        assistant_blocks: list[dict] = []
-        for block in resp.content:
-            if hasattr(block, "model_dump"):
-                assistant_blocks.append(block.model_dump())
-            else:
-                assistant_blocks.append(block)
-        messages.append({"role": "assistant", "content": assistant_blocks})
+    # Strip markdown fences if Claude included them
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text)
 
-        if resp.stop_reason == "end_turn":
-            break
-        if resp.stop_reason != "tool_use":
-            break
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        log.append(f"  ✗ Claude 回的 JSON 解析失敗: char {e.pos}")
+        log.append(f"     第一個 200 字: {text[:200]}")
+        raise
 
-        tool_results: list[dict] = []
-        finished = False
+    files_list = data.get("files", [])
+    if not files_list:
+        log.append("  ✗ Claude 回的 JSON 沒有 files 欄位")
+        raise ValueError("Builder oneshot: JSON missing 'files' key")
 
-        for block in resp.content:
-            if getattr(block, "type", None) != "tool_use":
-                continue
+    written: dict[str, str] = {}
+    for entry in files_list:
+        path = entry.get("path")
+        content = entry.get("content")
+        if not path or content is None:
+            continue
+        result = write_file(job_id, path, content)
+        if result["ok"]:
+            log.append(f"  [tool] write_file {path} ✓")
+            written[path] = content
+        else:
+            log.append(f"  [tool] write_file {path} ✗ ({result['error']})")
 
-            tool_name = block.name
-            tool_input = dict(block.input) if block.input else {}
-            tool_calls += 1
-
-            result = execute_tool(tool_name, job_id, **tool_input)
-
-            summary = _summarize_tool_call(tool_name, tool_input)
-            check = "✓" if result["ok"] else "✗"
-            log.append(f"  [tool] {summary} {check}")
-
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": (result["output"] or result["error"] or "ok")[:1500],
-                "is_error": not result["ok"],
-            })
-
-            if tool_name == "submit_done":
-                finished = True
-
-        messages.append({"role": "user", "content": tool_results})
-
-        if finished:
-            break
-
-    written = _read_sandbox_files(job_id)
-    log.append(f"✓ Builder: 寫完 {len(written)} 個檔案 · {tool_calls} 次工具呼叫")
+    usage = getattr(resp, "usage", None)
+    in_tok = getattr(usage, "input_tokens", 0) if usage else 0
+    out_tok = getattr(usage, "output_tokens", 0) if usage else 0
+    log.append(
+        f"✓ Builder: 寫完 {len(written)} 個檔案 · "
+        f"1 次 Claude call (input {in_tok} / output {out_tok} tokens)"
+    )
     return written
 
 
