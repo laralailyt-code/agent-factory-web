@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import sys
+import threading
 import uuid
 from pathlib import Path
 
@@ -26,10 +28,12 @@ from pydantic import BaseModel
 
 from .graph import build_graph
 from .llm import is_mock, set_mock_override, mode_status
+from .memory import record_feedback
 from . import telemetry
 
 
 app = FastAPI(title="Agent Factory · Web")
+SSE_KEEPALIVE_SECONDS = 15
 
 STATIC_DIR = Path(__file__).parent / "static"
 STATIC_DIR.mkdir(exist_ok=True)
@@ -98,6 +102,14 @@ def submit_feedback(payload: FeedbackPayload) -> dict:
         raise HTTPException(400, "訊息空白")
     if len(msg) > 2000:
         msg = msg[:2000] + "..."
+
+    memory_context = {
+        "job_id": payload.job_id or "",
+        "mode": payload.mode or "",
+        "deploy_url": payload.deploy_url or "",
+        "user_request": (payload.user_request or "")[:200],
+    }
+    record_feedback(msg, source="web", context=memory_context)
 
     if not telemetry.is_configured():
         # Fallback: log to stdout so Render dashboard captures it
@@ -202,9 +214,47 @@ async def stream_factory(req: str = ""):
             "log": [],
         }
 
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+
+        def run_pipeline() -> None:
+            try:
+                for state in graph.stream(initial, stream_mode="values"):
+                    events.put(("state", state))
+                events.put(("done", None))
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                # Auto-telemetry · push pipeline crash to Lara's Telegram (silent no-op if not configured)
+                telemetry.notify_exception(
+                    e,
+                    tag="pipeline-crash",
+                    context={
+                        "job_id": job_id,
+                        "mode": mode,
+                        "request": user_request[:200],
+                    },
+                )
+                events.put(("error", f"{type(e).__name__}: {e}"))
+
+        threading.Thread(
+            target=run_pipeline,
+            name=f"factory-stream-{job_id}",
+            daemon=True,
+        ).start()
+
         last_log_len = 0
-        try:
-            for state in graph.stream(initial, stream_mode="values"):
+        while True:
+            try:
+                event_type, payload = await asyncio.to_thread(
+                    events.get, True, SSE_KEEPALIVE_SECONDS
+                )
+            except queue.Empty:
+                # Keep Render/browser/proxy SSE connections alive during long LLM calls.
+                yield ": keepalive\n\n"
+                continue
+
+            if event_type == "state":
+                state = payload
                 log = state.get("log", []) or []
                 for line in log[last_log_len:]:
                     yield f"data: {json.dumps({'type': 'log', 'line': line}, ensure_ascii=False)}\n\n"
@@ -216,30 +266,23 @@ async def stream_factory(req: str = ""):
                     "current_stage": state.get("current_stage"),
                     "iteration": state.get("iteration", 0),
                     "prd": state.get("prd"),
+                    "analysis": state.get("analysis"),
                     "design": state.get("design"),
                     "file_count": len(state.get("files", {}) or {}),
                     "file_names": list((state.get("files", {}) or {}).keys()),
                     "test_results": state.get("test_results"),
+                    "quality_review": state.get("quality_review"),
                     "deploy_url": state.get("deploy_url"),
+                    "verification": state.get("verification"),
                 }
                 yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
                 await asyncio.sleep(0.05)
-
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            # Auto-telemetry · push pipeline crash to Lara's Telegram (silent no-op if not configured)
-            telemetry.notify_exception(
-                e,
-                tag="pipeline-crash",
-                context={
-                    "job_id": job_id,
-                    "mode": mode,
-                    "request": user_request[:200],
-                },
-            )
-            yield f"data: {json.dumps({'type': 'error', 'message': f'{type(e).__name__}: {e}'}, ensure_ascii=False)}\n\n"
+            elif event_type == "done":
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
+            elif event_type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': payload}, ensure_ascii=False)}\n\n"
+                return
 
     return StreamingResponse(
         event_gen(),
