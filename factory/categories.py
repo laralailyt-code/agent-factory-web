@@ -43,6 +43,16 @@ CATEGORIES: list[Category] = [
         description="兩個 Excel 比差異 · 機密資料本機處理 · 桌面 .exe",
     ),
     Category(
+        key="multi_format_diff",
+        name_tc="文件比對(多格式)",
+        group="company",
+        agent_type="desktop_app",
+        deploy_target="Desktop .exe (internal IT push)",
+        tech_hint=["Python", "pandas", "openpyxl", "pdfplumber", "python-docx", "customtkinter", "PyInstaller"],
+        keywords=["pdf", "word", "docx", "文件比對", "跨格式", "多格式", "doc"],
+        description="跨格式文件比對 (.xlsx / .csv / .pdf / .docx / .txt) · 機密本機處理",
+    ),
+    Category(
         key="war_room",
         name_tc="競品戰情室",
         group="company",

@@ -212,6 +212,18 @@ def derive_lessons(state: FactoryState) -> list[dict[str, Any]]:
                 "confidence": 0.6,
             })
 
+    # L3 Builder critique issues(對照憲法的違反)· LLM 看出的設計問題權重高一點
+    critique = state.get("builder_critique", {}) or {}
+    for issue in (critique.get("issues") or [])[:5]:
+        if isinstance(issue, str) and issue.strip():
+            lessons.append({
+                "subcategory": subcategory,
+                "lesson": f"L3 critique flagged: {_compact(issue, 250)}. Future builds must avoid this pattern.",
+                "source_job_id": job_id,
+                "source": "builder_critique",
+                "confidence": 0.7,
+            })
+
     return lessons
 
 

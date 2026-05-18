@@ -338,7 +338,7 @@ def verifier_node(state: FactoryState) -> FactoryState:
         checks = _verify_raw_material(base)
     elif sub == "war_room":
         checks = _verify_war_room(base)
-    elif sub == "excel_diff":
+    elif sub in {"excel_diff", "multi_format_diff"}:
         checks = _verify_excel_diff(deploy_url, base)
     elif agent_type == "monitoring":
         checks = _verify_generic_monitoring(base)

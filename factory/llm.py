@@ -128,6 +128,23 @@ MOCK_DESIGNS: dict[str, dict] = {
         "file_plan": ["main.py", "diff_engine.py", "gui.py", "telemetry.py", "build.spec", "requirements.txt"],
         "distribution": "Win32 .exe · 內網 IT 推送 · 47 同事自動更新 · 內建 schema-only 錯誤上報",
     },
+    "multi_format_diff": {
+        "stack": ["Python 3.11", "pandas", "openpyxl", "pdfplumber", "python-docx", "customtkinter", "PyInstaller"],
+        "deploy_target": "Desktop .exe (internal IT push)",
+        "api_routes": [],
+        "file_plan": [
+            "main.py",
+            "loaders.py",
+            "diff_engine.py",
+            "gui.py",
+            "normalizer.py",
+            "report_builder.py",
+            "telemetry.py",
+            "build.spec",
+            "requirements.txt",
+        ],
+        "distribution": "Win32 .exe · 內網 IT 推送 · 機密本機處理 · 跨格式 (.xlsx/.csv/.pdf/.docx/.txt)",
+    },
     "war_room": {
         "stack": ["Next.js 14", "TypeScript", "Tailwind CSS", "Redis", "Vercel Cron"],
         "deploy_target": "Vercel + Cron 每 15 分鐘",
@@ -391,6 +408,130 @@ def call_llm_json(
             log=log,
         )
         return json.loads(_strip_fences(text2))
+
+
+# ============ KIMI CLIENT (Azure OpenAI deployment · for Builder) ============
+#
+# 比賽提供:Kimi-K2.5 · 126M tokens · 35K TPM · 比 Claude 寬鬆 10 倍
+# 用途:Builder 一次輸出 32K tokens 太燒 Claude 預算 · 改走 Kimi
+# 路由:由 USE_KIMI_FOR_BUILDER env 決定 · false / 沒設 → 走原本 Claude 路徑(回退安全)
+#
+# 兩個 SDK 並存:Anthropic SDK (Claude) + OpenAI SDK (Azure-hosted Kimi)
+# 共用同把 API key(主辦 Azure cognitiveservices 上的 cognitive services key)
+
+_kimi_client = None
+
+
+def _get_kimi_client():
+    global _kimi_client
+    if _kimi_client is None:
+        from openai import AzureOpenAI
+        _kimi_client = AzureOpenAI(
+            api_key=os.getenv("KIMI_API_KEY", "").strip(),
+            azure_endpoint=os.getenv("KIMI_AZURE_ENDPOINT", "").strip(),
+            api_version=os.getenv("KIMI_API_VERSION", "2024-10-21").strip(),
+            timeout=600.0,
+            max_retries=0,
+        )
+    return _kimi_client
+
+
+def _use_kimi_for_builder() -> bool:
+    """Builder 是否走 Kimi · env 開關 · 預設 false(安全回退到 Claude)"""
+    return os.getenv("USE_KIMI_FOR_BUILDER", "false").lower() == "true"
+
+
+def kimi_chat_completion(
+    *,
+    system: str,
+    user: str,
+    max_tokens: int = 32000,
+    log: Optional[list[str]] = None,
+):
+    """呼叫 Kimi-K2.5 chat completion · 回 OpenAI 格式的 ChatCompletion。
+
+    Wraps with retry (handles 429 rate limit + transient errors).
+    """
+    deploy = os.getenv("KIMI_DEPLOY_NAME", "Kimi-K2.5").strip()
+    attempts = _rate_limit_attempts()
+    for attempt in range(1, attempts + 1):
+        try:
+            return _get_kimi_client().chat.completions.create(
+                model=deploy,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            )
+        except Exception as exc:
+            if not _is_rate_limit_error(exc) or attempt >= attempts:
+                if _is_rate_limit_error(exc) and log is not None:
+                    log.append("  ✗ Kimi rate limit · 已達重試上限")
+                    log.append(f"     {_compact_error(exc)}")
+                raise
+            retry_after = _retry_after_seconds(exc)
+            fallback_wait = min(_rate_limit_max_wait(), _rate_limit_base_wait() * attempt)
+            wait_seconds = min(_rate_limit_max_wait(), retry_after or fallback_wait)
+            if log is not None:
+                log.append(
+                    f"  ⏳ Kimi rate limit · 等 {wait_seconds:.0f}s 後重試 ({attempt}/{attempts - 1})"
+                )
+            time.sleep(wait_seconds)
+    raise RuntimeError("unreachable: kimi_chat_completion exhausted attempts")
+
+
+class _KimiResponseShim:
+    """讓 Kimi 回應 quack 得像 Anthropic Message(讓 Builder 不用改 access pattern)。
+
+    Anthropic:`resp.content[0].text` · `resp.usage.input_tokens` · `resp.stop_reason`
+    Kimi/OpenAI:`resp.choices[0].message.content` · `resp.usage.prompt_tokens` · `resp.choices[0].finish_reason`
+    """
+    def __init__(self, openai_resp):
+        text = openai_resp.choices[0].message.content or ""
+        self.content = [type("Block", (), {"text": text})()]
+        finish = openai_resp.choices[0].finish_reason
+        # OpenAI finish_reason: "stop" / "length" → 對映 Anthropic "end_turn" / "max_tokens"
+        self.stop_reason = "max_tokens" if finish == "length" else "end_turn"
+        u = getattr(openai_resp, "usage", None)
+        if u is not None:
+            self.usage = type("Usage", (), {
+                "input_tokens": getattr(u, "prompt_tokens", 0),
+                "output_tokens": getattr(u, "completion_tokens", 0),
+            })()
+        else:
+            self.usage = None
+
+
+def create_builder_message(
+    *,
+    log: Optional[list[str]] = None,
+    system: str,
+    messages: list,
+    max_tokens: int = 32000,
+    model: Optional[str] = None,
+):
+    """Builder 專用 message create · 依 USE_KIMI_FOR_BUILDER 路由。
+
+    回傳物件相容 Anthropic Message(`.content[0].text` / `.usage.input_tokens` / `.stop_reason`)。
+    """
+    if _use_kimi_for_builder():
+        # 用 Kimi · messages 是 OpenAI 格式但我們的 messages 通常是 [{"role": "user", "content": "..."}]
+        # 直接展開 user message · 用 system+user 形式呼叫
+        user_text = "\n".join(m["content"] for m in messages if m.get("role") == "user")
+        if log is not None:
+            log.append(f"  📡 Builder via Kimi-K2.5 (Azure deployment)")
+        raw = kimi_chat_completion(
+            system=system, user=user_text, max_tokens=max_tokens, log=log,
+        )
+        return _KimiResponseShim(raw)
+    # Fallback · 走 Anthropic
+    if log is not None:
+        log.append(f"  📡 Builder via Claude {model or MODELS.get('sonnet', '?')}")
+    return create_message_with_retry(
+        log=log, model=model or MODELS["sonnet"],
+        max_tokens=max_tokens, system=system, messages=messages,
+    )
 
 
 def is_mock() -> bool:

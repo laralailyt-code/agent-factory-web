@@ -16,8 +16,9 @@ import re
 import time
 from pathlib import Path
 from ..state import FactoryState
-from ..llm import is_mock, create_message_with_retry, MODELS
+from ..llm import is_mock, create_message_with_retry, create_builder_message, MODELS
 from ..memory import format_lessons_for_prompt
+from ..quality_standards import get_constitution, get_constitution_summary
 from ..tools import write_file, run_command, execute_tool, TOOLS_SCHEMA
 
 
@@ -1399,6 +1400,9 @@ JSON-only API 服務(無 HTML 首頁)會**讓終端用戶看到 404 · 不可接
 - 避免使用 `/regex/s` 這種需要 ES2018+ 的 flag · 改用 `[\\s\\S]` 取代 `.`(更通用)
 - Next.js 14 使用 App Router · `app/page.tsx` + `app/layout.tsx` 都要有 · `app/page.tsx` 是首頁
 - 任何外部 npm 套件都要在 `package.json` 的 `dependencies` 列出 · 不要 import 沒裝的
+- **跨檔共享的 TypeScript type / interface 必須 `export`** · 任何 `import { X } from "./other"` 之前 · 確認 other.ts 真的 `export interface X` 或 `export type X`
+- **shared types 抽到 `scrapers/types.ts` 或 `lib/types.ts`**(不要把 type 塞在 acer.ts 然後 dell.ts 互 import · 容易漏 export)
+- 所有 `interface` 跟 `type` 預設加 `export` · 即使該檔現在沒被別檔 import(零成本 · 但避免之後加新檔 import 時忘記回去改)
 - If `app/page.tsx` starts with `"use client"`, do not export Next route config from that file.
   In client components, never include `export const revalidate`, `export const dynamic`,
   `export const fetchCache`, or `export const runtime`.
@@ -1477,16 +1481,25 @@ def _builder_real(state: FactoryState, job_id: str, iteration: int, log: list[st
                 f"{errors_str}\n\n請修正後重寫完整 JSON。"
             )
 
-    # 65 秒冷卻 · 讓 Azure 60s 視窗完全清空 Clarifier + Architect 已用的 tokens
-    log.append(f"  ⏳ 給 Azure TPM 視窗冷卻 {_BUILDER_STARTUP_DELAY:.0f}s · 避免 2000 tokens/60s 上限...")
-    time.sleep(_BUILDER_STARTUP_DELAY)
+    # Kimi 路徑 TPM 35K(寬鬆 17 倍)· 不需冷卻 · 直接打
+    # Claude 路徑沿用 65s 冷卻(Azure Anthropic 限 2000 TPM)
+    import os as _os
+    if _os.getenv("USE_KIMI_FOR_BUILDER", "false").lower() == "true":
+        log.append("  ⚡ Kimi-K2.5 路徑(35K TPM)· 跳過 65s 冷卻 · 直接打")
+    else:
+        log.append(f"  ⏳ Claude 路徑 · 給 Azure TPM 視窗冷卻 {_BUILDER_STARTUP_DELAY:.0f}s · 避免 2000 tokens/60s 上限...")
+        time.sleep(_BUILDER_STARTUP_DELAY)
 
     log.append(f"  📝 Builder 一次 call 輸出 {len(file_plan)} 個檔案...")
-    resp = create_message_with_retry(
+    # 把品質憲法注入到 system prompt · 所有產品都套同一份基線
+    system_prompt = f"{BUILDER_ONESHOT_SYSTEM}\n\n{get_constitution()}"
+    # 走 router · USE_KIMI_FOR_BUILDER=true → Kimi-K2.5 · 否則 Claude sonnet
+    # Kimi 路徑能拿 35K TPM(vs Claude 2K)· 省 Claude 預算 + 不必 65s 冷卻
+    resp = create_builder_message(
         log=log,
         model=MODELS["sonnet"],
         max_tokens=32000,  # 拉到上限 · war_room 12 檔需要更多空間
-        system=BUILDER_ONESHOT_SYSTEM,
+        system=system_prompt,
         messages=[{"role": "user", "content": user_msg}],
     )
 
@@ -1531,7 +1544,212 @@ def _builder_real(state: FactoryState, job_id: str, iteration: int, log: list[st
         f"✓ Builder: 寫完 {len(written)} 個檔案 · "
         f"1 次 Claude call (input {in_tok} / output {out_tok} tokens)"
     )
+
+    # L3 兩層 critique
+    # Layer A · deterministic rule-based(掃 regex / 找關鍵字)
+    rule_critique = _critique_built_files(written, prd, design)
+
+    # Layer B · agentic LLM critique(sonnet review code digest · 找 deeper 設計問題)
+    acceptance = state.get("acceptance_criteria", []) or []
+    llm_critique = _llm_critique_built_files(written, prd, acceptance, log)
+
+    # 合併兩層 + 計算最終分數(取較低)
+    final_score = min(rule_critique["score"], llm_critique.get("score", 100))
+    all_issues = rule_critique["issues"] + llm_critique.get("issues", [])
+    critique = {
+        "score": final_score,
+        "rule_score": rule_critique["score"],
+        "llm_score": llm_critique.get("score", None),
+        "issues": all_issues,
+        "rule_checks": rule_critique["checks"],
+        "llm_review": llm_critique.get("review", ""),
+    }
+    state["builder_critique"] = critique
+    if all_issues:
+        log.append(f"  ⚠️ Builder L3 critique 找到 {len(all_issues)} 條(rule {rule_critique['score']}/100 · LLM {llm_critique.get('score', 'n/a')}/100):")
+        for issue in all_issues[:5]:
+            log.append(f"     · {issue}")
+        if len(all_issues) > 5:
+            log.append(f"     · ... 還有 {len(all_issues) - 5} 條")
+    else:
+        log.append(f"  ✓ Builder L3 critique 過關 · rule {rule_critique['score']}/100 · LLM {llm_critique.get('score', 'n/a')}/100")
+
     return written
+
+
+# === L3 LLM critique ===
+
+_L3_LLM_DELAY = 65.0  # Azure TPM window cooldown 一致
+
+L3_LLM_SYSTEM = """你是 Agent Factory 的 L3 Builder Code Reviewer。
+
+角色:看 Builder 剛寫的 code · 對照 acceptance_criteria + 品質憲法 · 找出**結構性 / 設計性**的問題(不是 lint 級別 · rule-based 那層已經處理)。
+
+關注:
+- 主流程是否真的能完成 user 想做的事?(不是 stub / 不是 TODO)
+- UI 是否實作了關鍵互動?(按鈕對應的 handler 真有實作?)
+- 多檔案是否真互相串接?(import 跟實際呼叫對得起來?)
+- 邊界 case 真的 catch 了 還是只有寫 try/except 但內部還是 raise?
+- sample_data 真的能跑出有意義結果還是只是 placeholder?
+
+評分 1-100:
+- 90-100:扎實 · ship 沒問題
+- 70-89:能 demo · 但有 1-2 個明顯缺陷
+- 50-69:有明顯問題 · 評審追問會穿幫
+- < 50:不行 · 必須重做
+
+輸出嚴格 JSON:
+{
+  "score": 0-100 數字,
+  "issues": ["問題 1 描述", "問題 2 描述", ...],
+  "review": "1-2 段整體評論"
+}"""
+
+
+def _llm_critique_built_files(
+    files: dict[str, str],
+    prd: dict,
+    acceptance: list[str],
+    log: list[str],
+) -> dict:
+    """L3 agentic critique · sonnet 看 file digest · 抓設計 / 結構問題。
+
+    REAL 模式等 65s 冷卻 · MOCK 模式跳過回 {}
+    Failsafe:LLM 掛了不阻擋 · 回空 dict。
+    """
+    if is_mock():
+        return {}
+
+    log.append(f"  ⏳ L3 LLM critique 等 Azure TPM 視窗 {_L3_LLM_DELAY:.0f}s...")
+    time.sleep(_L3_LLM_DELAY)
+
+    # File digest:每檔頭 30 行 + 大小 · 控制在 ~6KB 內
+    digest_parts = []
+    for name, content in list(files.items())[:15]:  # 最多 15 檔
+        head = "\n".join(content.splitlines()[:30])
+        digest_parts.append(f"=== {name} ({len(content)} bytes) ===\n{head}")
+    digest = "\n\n".join(digest_parts)
+    if len(digest) > 8000:
+        digest = digest[:8000] + "\n... (截斷)"
+
+    acceptance_str = "\n".join(f"- {a}" for a in acceptance[:20])
+    user_msg = (
+        f"產品類別: {prd.get('subcategory')} ({prd.get('agent_type')})\n"
+        f"產品目標: {prd.get('summary')}\n\n"
+        f"關鍵 acceptance criteria:\n{acceptance_str}\n\n"
+        f"Builder 寫的 file digest(每檔頭 30 行):\n\n{digest}\n\n"
+        f"請 review · 重點看主流程實作 / 多檔案互相串接 / 邊界 case 是否真 catch / sample_data 真實性 · 輸出 JSON。"
+    )
+
+    try:
+        result = call_llm_json(
+            system=L3_LLM_SYSTEM,
+            user=user_msg,
+            model="sonnet",
+            max_tokens=2500,
+            log=log,
+        )
+        score = result.get("score")
+        if not isinstance(score, (int, float)):
+            return {}
+        issues = result.get("issues", [])
+        if not isinstance(issues, list):
+            issues = []
+        issues = [str(x).strip() for x in issues if isinstance(x, str) and str(x).strip()][:6]
+        return {
+            "score": int(score),
+            "issues": issues,
+            "review": str(result.get("review", ""))[:500],
+        }
+    except Exception as e:
+        log.append(f"  ⚠️ L3 LLM critique 失敗(failsafe · 不阻擋):{type(e).__name__}: {e}")
+        return {}
+
+
+def _critique_built_files(files: dict[str, str], prd: dict, design: dict) -> dict:
+    """L3 · 對照憲法掃描 Builder 寫出來的檔案 · 找出明顯違反。
+
+    Deterministic check · 0 token · 不觸發 retry(讓 L4 Tester runtime check 當 gate)。
+    Returns: {"score": 0-100, "issues": [str], "checks": [...]}
+    """
+    agent_type = prd.get("agent_type", "")
+    subcategory = prd.get("subcategory", "")
+    is_personal = subcategory in {"family_photo", "personal_budget", "split_bill", "ecommerce"}
+
+    issues: list[str] = []
+    checks: list[dict] = []
+
+    all_text = "\n".join(files.values())
+
+    # 1. 禁硬編日期(任何 2024-/2025-/2026- 字串)· 但 .toISOString() / new Date() 自動產的不算
+    bad_dates = re.findall(r"['\"](20\d{2}-\d{2}-\d{2})['\"]", all_text)
+    real_bad = [d for d in bad_dates if not d.startswith("2099")]  # 2099 是常用 placeholder
+    checks.append({"name": "禁硬編日期", "pass": not real_bad, "detail": f"找到 {len(real_bad)} 個硬編日期" if real_bad else "OK"})
+    if real_bad:
+        issues.append(f"違反「禁硬編日期」· 樣本:{real_bad[:3]}")
+
+    # 2. sample_data.json 涵蓋多個 case
+    sample_file = None
+    for name, content in files.items():
+        if name.endswith("sample_data.json"):
+            sample_file = content
+            break
+    if sample_file:
+        # 簡單啟發式:大於 1KB 通常代表有多 case
+        size_ok = len(sample_file) > 500
+        checks.append({"name": "sample_data 多 case", "pass": size_ok, "detail": f"{len(sample_file)} bytes"})
+        if not size_ok:
+            issues.append("sample_data.json < 500 bytes · 可能只 1 case · 憲法要求 4 case")
+
+    # 3. UI 標準
+    if agent_type == "desktop_app":
+        has_modern_ui = any(
+            kw in all_text
+            for kw in ["customtkinter", "CustomTkinter", "ttkbootstrap", "ttk.Style"]
+        )
+        checks.append({"name": "Desktop UI 用 CustomTkinter/ttkbootstrap", "pass": has_modern_ui, "detail": "OK" if has_modern_ui else "用了裸 tkinter"})
+        if not has_modern_ui:
+            issues.append("Desktop 違反「禁裸 tkinter」· 應用 CustomTkinter 或 ttkbootstrap")
+    elif agent_type in {"monitoring", "website", "automation"}:
+        has_tailwind = "tailwindcss" in all_text.lower() or "tailwind" in all_text.lower()
+        checks.append({"name": "Web UI 用 Tailwind", "pass": has_tailwind, "detail": "OK" if has_tailwind else "沒看到 Tailwind"})
+        if not has_tailwind:
+            issues.append("Web 違反「必用 Tailwind」")
+
+    # 4. 可測試性
+    if agent_type == "desktop_app":
+        has_selftest = "--selftest" in all_text or "selftest" in all_text.lower()
+        checks.append({"name": "Desktop 必有 --selftest", "pass": has_selftest, "detail": "OK" if has_selftest else "找不到 --selftest 入口"})
+        if not has_selftest:
+            issues.append("Desktop 違反「必有 --selftest CLI」· Tester L4 無法 runtime 驗")
+    elif agent_type in {"monitoring", "website", "automation"}:
+        has_health = "/api/health" in all_text or "/health" in all_text
+        checks.append({"name": "Web 必有 /api/health", "pass": has_health, "detail": "OK" if has_health else "找不到 /api/health"})
+        if not has_health:
+            issues.append("Web 違反「必有 /api/health」")
+
+    # 5. ASUS POV(僅 company 類)
+    if not is_personal and subcategory not in ("", "_default"):
+        has_asus = "ASUS" in all_text or "華碩" in all_text
+        checks.append({"name": "company 類有 ASUS 字樣", "pass": has_asus, "detail": "OK" if has_asus else "整份產出找不到 ASUS"})
+        if not has_asus:
+            issues.append("Company 類違反「ASUS POV」· 沒出現 ASUS / 華碩")
+
+    # 6. 錯誤捕捉(Python 主要檔案有 try/except)
+    py_main_candidates = ["main.py", "app.py", "gui.py", "server.py", "diff_engine.py"]
+    py_main_text = "\n".join(files[n] for n in py_main_candidates if n in files)
+    if py_main_text:
+        has_try = "try:" in py_main_text and "except" in py_main_text
+        checks.append({"name": "Python 主流程有 try/except", "pass": has_try, "detail": "OK" if has_try else "沒看到錯誤捕捉"})
+        if not has_try:
+            issues.append("主流程沒 try/except · KeyError / FileNotFoundError 會直接炸給 user")
+
+    # 計分
+    total = len(checks) or 1
+    passed = sum(1 for c in checks if c["pass"])
+    score = round(passed / total * 100)
+
+    return {"score": score, "issues": issues, "checks": checks}
 
 
 # ============ NODE ENTRYPOINT ============
