@@ -122,11 +122,30 @@ MOCK_PRDS: dict[str, dict] = {
 
 MOCK_DESIGNS: dict[str, dict] = {
     "excel_diff": {
-        "stack": ["Python 3.11", "pandas", "openpyxl", "tkinter", "PyInstaller"],
+        "stack": [
+            "Python 3.11",
+            "pandas",
+            "openpyxl",
+            "customtkinter",
+            "tkinterdnd2",
+            "reportlab",
+            "PyInstaller",
+        ],
         "deploy_target": "Desktop .exe (internal IT push)",
         "api_routes": [],
-        "file_plan": ["main.py", "diff_engine.py", "gui.py", "telemetry.py", "build.spec", "requirements.txt"],
-        "distribution": "Win32 .exe · 內網 IT 推送 · 47 同事自動更新 · 內建 schema-only 錯誤上報",
+        "file_plan": [
+            "main.py",
+            "gui.py",
+            "diff_engine.py",
+            "loaders.py",
+            "normalizer.py",
+            "color_writer.py",
+            "report_pdf.py",
+            "telemetry.py",
+            "build.spec",
+            "requirements.txt",
+        ],
+        "distribution": "Win32 .exe · 內網 IT 推送 · CustomTkinter 現代 UI · 拖放支援 · 多 sheet 顏色 diff · 匯出標紅 .xlsx + 摘要 .xlsx + 統計 PDF · schema-only 錯誤上報",
     },
     "multi_format_diff": {
         "stack": ["Python 3.11", "pandas", "openpyxl", "pdfplumber", "python-docx", "customtkinter", "PyInstaller"],

@@ -1339,6 +1339,16 @@ BUILDER_ONESHOT_SYSTEM = """你是 Agent Factory 的 Builder。給你 PRD + Desi
   ]
 }
 
+⚠️ **JSON string 內 backslash escape 規則(必須遵守 · 違反整個 JSON parse 失敗)**:
+JSON string 內任何 `\\` 後面如果不是 `n / t / r / " / \\ / / / b / f / u` 都必須 double-escape 成 `\\\\`。
+常見錯例 + 正確寫法:
+- Python regex `\\d+`        → JSON 寫成 `"\\\\d+"`
+- Python regex `\\s*`        → `"\\\\s*"`
+- Python regex `[\\s\\S]`    → `"[\\\\s\\\\S]"`
+- Windows path `C:\\Users`   → `"C:\\\\Users"`
+- LaTeX `\\alpha`            → `"\\\\alpha"`
+規則簡單:**寫 content 字串時 · 任何單一 `\\` 全部變成 `\\\\`** · 除非後面正好是 `n / t / r / " / \\ / b / f / u`(這 9 個是 JSON 合法 escape)。
+
 規則:
 - 每個檔案完整可跑 · 不要 TODO · 不要省略
 - 嚴格遵守 design.file_plan 列表 · 不要少寫任何檔案
@@ -1403,6 +1413,12 @@ JSON-only API 服務(無 HTML 首頁)會**讓終端用戶看到 404 · 不可接
 - **跨檔共享的 TypeScript type / interface 必須 `export`** · 任何 `import { X } from "./other"` 之前 · 確認 other.ts 真的 `export interface X` 或 `export type X`
 - **shared types 抽到 `scrapers/types.ts` 或 `lib/types.ts`**(不要把 type 塞在 acer.ts 然後 dell.ts 互 import · 容易漏 export)
 - 所有 `interface` 跟 `type` 預設加 `export` · 即使該檔現在沒被別檔 import(零成本 · 但避免之後加新檔 import 時忘記回去改)
+- **React / Next.js page 必須對 sample_data 全部 case(含 test-error / test-variant 缺欄位的 case)都不能 crash**
+  - 訪問可能 undefined 的物件屬性 · 用 optional chaining(`comp?.opportunities`)
+  - 對可能 null/undefined 的 array 用 nullish coalescing(`(comp.opportunities ?? []).map(...)`)
+  - 對可能缺欄位的數字加預設(`comp.riskScore ?? 0`)
+  - 用 `try/catch` 包 `parseISO` / `JSON.parse` 之類會 throw 的呼叫
+  - 心法:**sample_data 為了測邊界故意有缺欄位 case** · page 看到爛資料應 graceful degrade 顯示「資料不完整」· 不是整個 React 樹炸掉給 user 看「Application error」
 - If `app/page.tsx` starts with `"use client"`, do not export Next route config from that file.
   In client components, never include `export const revalidate`, `export const dynamic`,
   `export const fetchCache`, or `export const runtime`.
@@ -1442,6 +1458,27 @@ JSON-only API 服務(無 HTML 首頁)會**讓終端用戶看到 404 · 不可接
 - **個人類產品**(family_photo / personal_budget)不適用此規則 · 維持中性敘事"""
 
 
+# === Subcategory-specific spec · 只在符合的 subcategory 才注入 user_msg ===
+# (放這裡 · 不放 BUILDER_ONESHOT_SYSTEM · 避免 system prompt 對所有 category 都太肥)
+DESKTOP_DIFF_SPEC = """
+⚠️ **desktop_app · excel_diff / multi_format_diff 專屬規格**(這個 prd 是這類 · 必須做到):
+
+UI:必用 customtkinter(或 ttkbootstrap)· 禁裸 tkinter · dark mode · 1100x720+ · 主標題 banner · 拖放區(tkinterdnd2)· 進度條 · 結果用 ctk.CTkTabview 每 sheet 1 tab · 中文 label + emoji icon。
+
+功能:支援 .xlsx/.xls/.csv(auto-detect 編碼)· auto-detect 主鍵欄 + 下拉可改 · 正規化比較(strip / 數字 / 日期 / unicode NFC)· 顏色 diff(綠新 / 紅刪 / 黃改)· 匯出 3 種(標紅 .xlsx + 摘要 .xlsx + PDF reportlab)。sample_data 4 對:正常 / 邊界(空 sheet)/ 錯誤(主鍵缺)/ 多變化(欄位順序+sheet 數不同)。
+
+錯誤:user 觸發點全 try/except · 抓 KeyError / FileNotFoundError / PermissionError / UnicodeDecodeError / ValueError / IndexError · 用 messagebox.showerror 中文友善訊息(不是 raise 給 console)。
+
+CLI:`if __name__ == "__main__"` + argparse 支援 --selftest · selftest 跑完整 headless 流程 · 成功 print SELFTEST_OK exit 0 · 失敗 print SELFTEST_FAIL exit 1。
+
+PyInstaller:--onefile · hiddenimports 列 customtkinter / tkinterdnd2 / openpyxl / pandas / reportlab · datas 包 sample_data · console=False。
+
+requirements.txt 必含:customtkinter>=5.2, tkinterdnd2>=0.4, openpyxl>=3.1, pandas>=2.0, reportlab>=4.0, pyinstaller>=6.0。
+
+(multi_format_diff 額外:加 pdfplumber>=0.10 + python-docx>=1.0 · loaders 依副檔名分流 · 正規化成共通 dict 再比。)
+""".strip()
+
+
 def _builder_real(state: FactoryState, job_id: str, iteration: int, log: list[str]) -> dict[str, str]:
     """One-shot Claude call · 輸出所有檔案的 JSON · 寫進 sandbox。
 
@@ -1457,7 +1494,12 @@ def _builder_real(state: FactoryState, job_id: str, iteration: int, log: list[st
     file_plan = design.get("file_plan", [])
     lessons_context = format_lessons_for_prompt(state)
 
+    # 對 desktop_app diff 類別 · 在 user_msg 注入專屬規格(避免 system prompt 對其他 category 也肥)
+    subcat = prd.get("subcategory", "")
+    spec_block = (DESKTOP_DIFF_SPEC + "\n\n") if subcat in {"excel_diff", "multi_format_diff"} else ""
+
     user_msg = (
+        f"{spec_block}"
         f"PRD:\n{json.dumps(prd, ensure_ascii=False, indent=2)}\n\n"
         f"Design:\n{json.dumps(design, ensure_ascii=False, indent=2)}\n\n"
         f"Analyst brief:\n{json.dumps(analysis, ensure_ascii=False, indent=2)}\n\n"
@@ -1505,6 +1547,22 @@ def _builder_real(state: FactoryState, job_id: str, iteration: int, log: list[st
 
     text = "".join(b.text for b in resp.content if hasattr(b, "text"))
     stop_reason = getattr(resp, "stop_reason", "?")
+    usage_info = getattr(resp, "usage", None)
+    in_tok_used = getattr(usage_info, "input_tokens", "?") if usage_info else "?"
+    out_tok_used = getattr(usage_info, "output_tokens", "?") if usage_info else "?"
+
+    # Empty response guard:Azure 端有時候因 rate limit / 內部問題回空 body
+    # 加詳細診斷訊息給 Lara 看 · 不要只 raise 不知道原因
+    if not text.strip():
+        log.append(f"  ✗ Builder 回了空 response · stop_reason={stop_reason} · input={in_tok_used} / output={out_tok_used} tokens")
+        log.append(f"     可能原因:Azure rate limit / token budget / endpoint 內部錯誤")
+        log.append(f"     資訊:system prompt {len(system_prompt):,} chars · user msg {len(user_msg):,} chars")
+        raise ValueError(
+            f"Builder LLM 回空 response(stop_reason={stop_reason}, in={in_tok_used}/out={out_tok_used})· "
+            f"可能 Azure rate-limited 或 system prompt 太大({len(system_prompt):,} chars)· "
+            "可試 USE_KIMI_FOR_BUILDER=true 換 provider · 或縮 acceptance_criteria 條數"
+        )
+
     if stop_reason == "max_tokens":
         log.append(f"  ⚠️ Claude 回應被 max_tokens 截斷 (回了 {len(text)} chars · stop_reason={stop_reason})")
 
@@ -1512,12 +1570,9 @@ def _builder_real(state: FactoryState, job_id: str, iteration: int, log: list[st
     text = re.sub(r"^```(?:json)?\s*", "", text.strip())
     text = re.sub(r"\s*```$", "", text)
 
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        log.append(f"  ✗ Claude 回的 JSON 解析失敗: char {e.pos}")
-        log.append(f"     第一個 200 字: {text[:200]}")
-        raise
+    data = _tolerant_json_loads(text, log)
+    if data is None:
+        raise json.JSONDecodeError("Builder oneshot: even tolerant parse failed", text, 0)
 
     files_list = data.get("files", [])
     if not files_list:
@@ -1664,6 +1719,32 @@ def _llm_critique_built_files(
     except Exception as e:
         log.append(f"  ⚠️ L3 LLM critique 失敗(failsafe · 不阻擋):{type(e).__name__}: {e}")
         return {}
+
+
+def _tolerant_json_loads(text: str, log: list[str]) -> dict | None:
+    r"""嘗試嚴格 json.loads · 失敗的話自動修「Kimi 寫 JSON 漏 escape」這類常見錯。
+
+    修法:把所有不合法的 backslash escape(`\X` X 不是 valid JSON escape char)
+    自動 double-escape。例如:
+      "\d+"   → "\\d+"   (Python regex backslash)
+      "C:\U"  → "C:\\U"  (Windows path)
+    Returns:dict 成功 / None 失敗(caller 應 raise)。
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        log.append(f"  ⚠️ JSON strict parse 失敗: {e.msg} @ char {e.pos} · 嘗試 tolerant 修復...")
+
+    # 把不合法的 backslash 自動 escape 成 double · 保留合法的 \" \\ \/ \b \f \n \r \t \uXXXX
+    fixed = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+    try:
+        result = json.loads(fixed)
+        log.append(f"  ✓ Tolerant parse 成功 · 自動修了 {(len(fixed) - len(text))} 個 backslash escape")
+        return result
+    except json.JSONDecodeError as e2:
+        log.append(f"  ✗ Tolerant parse 也失敗: {e2.msg} @ char {e2.pos}")
+        log.append(f"     第一個 200 字: {text[:200]}")
+        return None
 
 
 def _critique_built_files(files: dict[str, str], prd: dict, design: dict) -> dict:

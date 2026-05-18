@@ -162,6 +162,41 @@ def submit_exe_telemetry(payload: ExeTelemetryPayload) -> dict:
         severity="error",
         tag=f"exe-crash:{payload.app}",
     )
+
+    # 把 crash 寫進 Learner memory · 下次同 category Builder 自動帶 lesson 避這個 bug
+    try:
+        from .memory import _save_lesson  # type: ignore
+        # 從 app name 推 subcategory(ExcelDiff → excel_diff · 大致 best-effort)
+        app_lower = payload.app.lower()
+        if "excel" in app_lower and "diff" in app_lower:
+            subcat = "excel_diff"
+        elif "multi" in app_lower or "format" in app_lower:
+            subcat = "multi_format_diff"
+        else:
+            subcat = "_global"
+        # 抓最深的 frame · 通常是真兇
+        worst_frame = payload.frames[-1] if payload.frames else None
+        frame_loc = (
+            f"{worst_frame.file or '?'}:{worst_frame.line or '?'} in {worst_frame.func or '?'}"
+            if worst_frame else "unknown"
+        )
+        lesson_text = (
+            f"Production .exe crashed with {payload.error_type} at {frame_loc}. "
+            f"Future builds of '{subcat}' MUST wrap this code path in try/except, "
+            f"validate inputs before calling the failing operation, and show a friendly "
+            f"Chinese messagebox instead of crashing. Add a selftest case that reproduces "
+            f"this exact failure pattern so L4 adversarial testing catches it pre-ship."
+        )
+        _save_lesson({
+            "subcategory": subcat,
+            "lesson": lesson_text,
+            "source_job_id": f"exe-telemetry:{payload.app}",
+            "source": "exe_telemetry",
+            "confidence": 0.85,  # 高:真實 production 訊號
+        })
+    except Exception:
+        pass  # Learner failsafe · 不阻擋 telemetry
+
     return {"ok": True, "delivered": delivered}
 
 

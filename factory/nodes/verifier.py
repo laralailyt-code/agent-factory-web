@@ -175,7 +175,7 @@ def _verify_war_room(base: str) -> list[dict[str, Any]]:
     def _walk(obj: Any) -> None:
         if isinstance(obj, dict):
             for k, v in obj.items():
-                if k in ("updatedAt", "updated_at", "time", "pubDate", "pub_date", "publishedAt") and isinstance(v, str):
+                if k in ("updatedAt", "updated_at", "time", "pubDate", "pub_date", "publishedAt", "lastUpdated", "last_updated", "timestamp") and isinstance(v, str):
                     dt = _parse_dt(v)
                     if dt:
                         dates.append(dt)
@@ -253,38 +253,80 @@ def _parse_dt(s: str) -> datetime | None:
 
 
 def _verify_excel_diff(deploy_url: str, base: str) -> list[dict[str, Any]]:
-    """desktop_app · .exe 檔案層級驗證"""
-    # file:// path
+    """desktop_app · .exe 檔案存在 + 大小 + 真跑 --selftest 三層驗證。"""
+    checks: list[dict[str, Any]] = []
+    exe_path: Path | None = None
+
+    # 1. 找 .exe 路徑(file:// or 從 static/downloads 推回 / URL 下載)
     if deploy_url.startswith("file://"):
         path_str = deploy_url.replace("file://", "").split(" [")[0]
         try:
-            exe = Path(path_str)
-            if exe.exists():
-                size_mb = exe.stat().st_size / (1024 * 1024)
-                return [{
-                    "name": ".exe 檔案",
-                    "pass": size_mb > 1,
-                    "detail": f"{exe.name} · {size_mb:.1f} MB",
-                }]
-            return [{"name": ".exe 檔案", "pass": False, "detail": f"路徑不存在: {path_str}"}]
-        except Exception as e:
-            return [{"name": ".exe 檔案", "pass": False, "detail": f"{type(e).__name__}: {e}"}]
+            cand = Path(path_str)
+            if cand.exists():
+                exe_path = cand.resolve()
+        except Exception:
+            pass
 
-    # Public download URL
-    r = _http_get(base, timeout=60)
-    if not r or r.status_code != 200:
-        return [{
+    # 從 URL 推回本機 path(URL 是 .../downloads/ExcelDiff.exe)
+    if exe_path is None and "/downloads/" in base:
+        from urllib.parse import urlparse
+        fname = urlparse(base).path.rsplit("/", 1)[-1]
+        for candidate_root in [Path("factory/static/downloads"), Path("static/downloads")]:
+            cand = candidate_root / fname
+            if cand.exists():
+                exe_path = cand.resolve()
+                break
+
+    # 1a. 檔案存在 + 大小
+    if exe_path and exe_path.exists():
+        size_mb = exe_path.stat().st_size / (1024 * 1024)
+        checks.append({
+            "name": ".exe 檔案",
+            "pass": size_mb > 1,
+            "detail": f"{exe_path.name} · {size_mb:.1f} MB",
+        })
+    else:
+        # 退回 HTTP 下載驗證
+        r = _http_get(base, timeout=60)
+        if not r or r.status_code != 200:
+            return [{"name": ".exe 下載", "pass": False, "detail": f"HTTP {r.status_code if r else 'ERR'}"}]
+        size_mb = len(r.content) / (1024 * 1024)
+        checks.append({
             "name": ".exe 下載",
-            "pass": False,
-            "detail": f"HTTP {r.status_code if r else 'ERR'}",
-        }]
-    size_mb = len(r.content) / (1024 * 1024)
-    ct = r.headers.get("content-type", "?")
-    return [{
-        "name": ".exe 下載",
-        "pass": size_mb > 1,
-        "detail": f"{size_mb:.1f} MB · {ct}",
-    }]
+            "pass": size_mb > 1,
+            "detail": f"{size_mb:.1f} MB · {r.headers.get('content-type', '?')}",
+        })
+        return checks
+
+    # 2. 真跑 --selftest(L4 在 Tester 跑過 Python source 版 · 這裡跑打包後 .exe 確認 PyInstaller 沒漏 import)
+    import subprocess
+    try:
+        result = subprocess.run(
+            [str(exe_path), "--selftest"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60,
+        )
+        out = (result.stdout or "") + (result.stderr or "")
+        if result.returncode == 0 and "SELFTEST_OK" in out:
+            tail = out.strip().splitlines()[-1] if out.strip() else "OK"
+            checks.append({
+                "name": ".exe --selftest 真跑",
+                "pass": True,
+                "detail": f"exit 0 · {tail[:80]}",
+            })
+        else:
+            tail = "\n".join(out.strip().splitlines()[-3:])[:300] if out.strip() else "(no output)"
+            checks.append({
+                "name": ".exe --selftest 真跑",
+                "pass": False,
+                "detail": f"exit {result.returncode} · {tail}",
+            })
+    except subprocess.TimeoutExpired:
+        checks.append({"name": ".exe --selftest 真跑", "pass": False, "detail": "60s 超時"})
+    except Exception as e:
+        checks.append({"name": ".exe --selftest 真跑", "pass": False, "detail": f"{type(e).__name__}: {e}"})
+
+    return checks
 
 
 def _verify_generic_monitoring(base: str) -> list[dict[str, Any]]:
